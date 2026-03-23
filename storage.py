@@ -31,6 +31,12 @@ class Storage:
         finally:
             conn.close()
 
+    def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        existing = {row["name"] for row in rows}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
     def init_db(self) -> None:
         with self.connect() as conn:
             conn.execute(
@@ -56,6 +62,7 @@ class Storage:
                     run_id TEXT PRIMARY KEY,
                     candidate_id TEXT NOT NULL,
                     sim_id TEXT,
+                    alpha_id TEXT,
                     status TEXT NOT NULL,
                     submitted_at TEXT,
                     completed_at TEXT,
@@ -113,6 +120,8 @@ class Storage:
                 );
                 """
             )
+
+            self._ensure_column(conn, "runs", "alpha_id", "alpha_id TEXT")
 
             conn.execute(
                 """
@@ -204,17 +213,19 @@ class Storage:
                     run_id,
                     candidate_id,
                     sim_id,
+                    alpha_id,
                     status,
                     submitted_at,
                     completed_at,
                     error_message,
                     raw_result_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run.run_id,
                     run.candidate_id,
                     run.sim_id,
+                    run.alpha_id,
                     run.status,
                     dt_to_str(run.submitted_at),
                     dt_to_str(run.completed_at),
@@ -228,6 +239,7 @@ class Storage:
         run_id: str,
         *,
         sim_id: Optional[str] = None,
+        alpha_id: Optional[str] = None,
         status: Optional[str] = None,
         submitted_at: Optional[datetime] = None,
         completed_at: Optional[datetime] = None,
@@ -240,6 +252,10 @@ class Storage:
         if sim_id is not None:
             fields.append("sim_id = ?")
             values.append(sim_id)
+
+        if alpha_id is not None:
+            fields.append("alpha_id = ?")
+            values.append(alpha_id)
 
         if status is not None:
             fields.append("status = ?")
@@ -428,6 +444,19 @@ class Storage:
             ).fetchone()
             return row
 
+    def get_candidate_by_id(self, candidate_id: str) -> Optional[sqlite3.Row]:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM candidates
+                WHERE candidate_id = ?
+                LIMIT 1
+                """,
+                (candidate_id,),
+            ).fetchone()
+            return row
+
     def get_candidate_by_hash(self, expression_hash: str) -> Optional[sqlite3.Row]:
         with self.connect() as conn:
             row = conn.execute(
@@ -492,6 +521,152 @@ class Storage:
                 )
                 GROUP BY c.template_id, c.family
                 ORDER BY n_runs DESC
+                """,
+                (limit,),
+            ).fetchall()
+            return rows
+
+    def get_similarity_reference_candidates(
+        self,
+        *,
+        limit: int,
+        min_sharpe: float,
+        min_fitness: float,
+    ) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    c.candidate_id,
+                    c.expression_hash,
+                    c.canonical_expression,
+                    c.template_id,
+                    c.family,
+                    c.fields_json,
+                    c.params_json,
+                    c.settings_json,
+                    r.run_id,
+                    r.alpha_id,
+                    r.completed_at,
+                    m.sharpe,
+                    m.fitness,
+                    m.turnover,
+                    m.submit_eligible
+                FROM runs r
+                JOIN candidates c
+                    ON r.candidate_id = c.candidate_id
+                JOIN metrics m
+                    ON r.run_id = m.run_id
+                WHERE r.status = 'completed'
+                  AND m.sharpe IS NOT NULL
+                  AND m.fitness IS NOT NULL
+                  AND m.sharpe >= ?
+                  AND m.fitness >= ?
+                ORDER BY r.completed_at DESC
+                LIMIT ?
+                """,
+                (min_sharpe, min_fitness, limit),
+            ).fetchall()
+            return rows
+
+    def get_recent_bucket_reference_candidates(self, *, limit: int) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    c.candidate_id,
+                    c.expression_hash,
+                    c.canonical_expression,
+                    c.template_id,
+                    c.family,
+                    c.fields_json,
+                    c.params_json,
+                    c.settings_json,
+                    r.run_id,
+                    r.alpha_id,
+                    r.completed_at,
+                    m.sharpe,
+                    m.fitness,
+                    m.turnover,
+                    m.submit_eligible
+                FROM runs r
+                JOIN candidates c
+                    ON r.candidate_id = c.candidate_id
+                LEFT JOIN metrics m
+                    ON r.run_id = m.run_id
+                WHERE r.status = 'completed'
+                ORDER BY r.completed_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return rows
+
+    def get_submitted_candidate_rows(self, *, limit: int = 300) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    c.candidate_id,
+                    c.expression_hash,
+                    c.canonical_expression,
+                    c.template_id,
+                    c.family,
+                    c.fields_json,
+                    c.params_json,
+                    c.settings_json,
+                    r.run_id,
+                    r.alpha_id,
+                    s.submitted_at,
+                    m.sharpe,
+                    m.fitness,
+                    m.turnover,
+                    m.submit_eligible
+                FROM submissions s
+                JOIN runs r
+                    ON s.run_id = r.run_id
+                JOIN candidates c
+                    ON s.candidate_id = c.candidate_id
+                LEFT JOIN metrics m
+                    ON r.run_id = m.run_id
+                WHERE s.submission_status = 'submitted'
+                ORDER BY s.submitted_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return rows
+
+    def get_submission_eligible_candidates(self, *, limit: int) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    c.candidate_id,
+                    c.expression_hash,
+                    c.canonical_expression,
+                    c.template_id,
+                    c.family,
+                    c.fields_json,
+                    c.params_json,
+                    c.settings_json,
+                    r.run_id,
+                    r.alpha_id,
+                    r.completed_at,
+                    m.sharpe,
+                    m.fitness,
+                    m.turnover,
+                    m.submit_eligible
+                FROM runs r
+                JOIN candidates c
+                    ON r.candidate_id = c.candidate_id
+                JOIN metrics m
+                    ON r.run_id = m.run_id
+                WHERE r.status = 'completed'
+                  AND m.submit_eligible = 1
+                  AND r.alpha_id IS NOT NULL
+                ORDER BY r.completed_at DESC
+                LIMIT ?
                 """,
                 (limit,),
             ).fetchall()

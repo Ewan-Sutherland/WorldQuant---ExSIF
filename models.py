@@ -76,6 +76,7 @@ class Run:
     candidate_id: str
     sim_id: Optional[str]
     status: str
+    alpha_id: Optional[str] = None
     submitted_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     error_message: Optional[str] = None
@@ -87,6 +88,7 @@ class Run:
             run_id=new_id("run"),
             candidate_id=candidate_id,
             sim_id=None,
+            alpha_id=None,
             status=status,
         )
 
