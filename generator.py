@@ -34,7 +34,7 @@ class AlphaGenerator:
 
         params = self._sample_params(template["expression"])
         expr, fields = self._render(template["expression"], params)
-        expr = self._post_process(expr, light=False, force_smoothing=False)
+        expr = self._post_process(expr)
 
         settings = self._sample_settings(family)
         canon = canonicalize_expression(expr)
@@ -124,19 +124,27 @@ class AlphaGenerator:
 
         for t in templates:
             tid = t["template_id"]
-            base = 1.0 if not bias else max(bias.get(tid, 1.0), 0.001)
-            base *= config.PREFERRED_TEMPLATE_BOOSTS.get(tid, 1.0)
-            base *= config.TEMPLATE_WEIGHT_PENALTIES.get(tid, 1.0)
+
+            if tid in getattr(config, "DISABLED_FRESH_TEMPLATES", set()):
+                continue
+
+            if tid in getattr(config, "SOFT_BLOCK_FRESH_TEMPLATES", set()):
+                if self.rng.random() > getattr(config, "SOFT_BLOCK_FRESH_PROB", 0.10):
+                    continue
 
             if tid in getattr(config, "TINY_EXPLORATION_TEMPLATES", set()):
                 if self.rng.random() > getattr(config, "TINY_EXPLORATION_PROB", 0.03):
                     continue
 
-            if base <= 0.0:
+            w = 1.0 if not bias else max(bias.get(tid, 1.0), 0.001)
+            w *= getattr(config, "PREFERRED_TEMPLATE_BOOSTS", {}).get(tid, 1.0)
+            w *= getattr(config, "TEMPLATE_WEIGHT_PENALTIES", {}).get(tid, 1.0)
+
+            if w <= 0.0:
                 continue
 
             filtered.append(t)
-            weights.append(max(base, 0.001))
+            weights.append(max(w, 0.001))
 
         if not filtered:
             return self.rng.choice(templates)
@@ -179,101 +187,78 @@ class AlphaGenerator:
     def _choose_refinement_template(self, family: str, template_id: str, mode: str) -> dict[str, str]:
         templates = TEMPLATE_LIBRARY[family]
         current = next((t for t in templates if t["template_id"] == template_id), templates[0])
-
-        stay_prob = 0.55
-        if mode == "fitness":
-            stay_prob = getattr(config, "LOW_FITNESS_STAY_IN_TEMPLATE_PROB", 0.80)
-        elif mode == "turnover":
-            stay_prob = getattr(config, "HIGH_TURNOVER_STAY_IN_TEMPLATE_PROB", 0.90)
-
-        if self.rng.random() < stay_prob:
-            return current
-
-        switch_prob = getattr(config, "REFINEMENT_TEMPLATE_SWITCH_PROB", 0.20)
-        if mode == "sharpe":
-            switch_prob += 0.05
-        if self.rng.random() >= switch_prob:
-            return current
-
         sisters = [t for t in templates if t["template_id"] != template_id]
+
         if not sisters:
             return current
 
-        filtered = []
-        weights = []
-        disabled = getattr(config, "DISABLED_REFINEMENT_TEMPLATES", set())
+        switch_prob = getattr(config, "REFINEMENT_TEMPLATE_SWITCH_PROB", 0.30)
+        if mode == "sharpe":
+            switch_prob += 0.10
+        elif mode in {"fitness", "turnover"}:
+            switch_prob += 0.05
 
-        for t in sisters:
-            tid = t["template_id"]
-            if tid in disabled:
-                continue
-
-            w = 1.0
-            if tid in getattr(config, "TINY_EXPLORATION_TEMPLATES", set()):
-                w *= 0.05
-
-            if family == "mean_reversion":
-                if mode in {"fitness", "turnover"} and tid in {"mr_04", "mr_01"}:
-                    w *= 1.30
-                elif mode == "sharpe" and tid in {"mr_02", "mr_04"}:
-                    w *= 1.20
-                elif tid == "mr_03":
-                    w *= 0.90
-            elif family == "volume_flow":
-                if tid == "vol_03":
-                    w *= 1.25
-                elif tid == "vol_01":
-                    w *= 0.85
-                elif tid == "vol_02":
-                    w = 0.0
-            elif family == "vol_adjusted":
-                if tid == "va_02":
-                    w *= 1.40
-                elif tid == "va_01":
-                    w *= 0.35
-            elif family == "conditional":
-                if tid == "cond_01":
-                    w *= 1.20
-                elif tid == "cond_02":
-                    w *= 0.75
-                elif tid == "cond_03":
-                    w *= 0.05
-
-            if w <= 0.0:
-                continue
-            filtered.append(t)
-            weights.append(max(w, 0.001))
-
-        if not filtered:
+        if self.rng.random() >= switch_prob:
             return current
 
-        return self.rng.choices(filtered, weights=weights, k=1)[0]
+        weights: list[float] = []
+        for t in sisters:
+            tid = t["template_id"]
+            w = 1.0
+            if family == "mean_reversion":
+                if mode in {"fitness", "turnover"} and tid in {"mr_04", "mr_01"}:
+                    w = 1.35
+                elif mode == "sharpe" and tid in {"mr_02", "mr_03", "mr_04"}:
+                    w = 1.25
+            elif family == "volume_flow":
+                if mode == "turnover" and tid in {"vol_01", "vol_02"}:
+                    w = 1.35
+                elif mode == "fitness" and tid == "vol_03":
+                    w = 1.25
+            elif family == "vol_adjusted":
+                if tid == "va_02":
+                    w = 1.40
+                elif tid == "va_01":
+                    w = 0.50
+            elif family == "conditional":
+                if tid == "cond_03":
+                    w = 0.15
+                elif mode in {"fitness", "turnover"} and tid in {"cond_01", "cond_02"}:
+                    w = 1.25
+            weights.append(w)
+
+        return self.rng.choices(sisters, weights=weights, k=1)[0]
 
     # ============================
     # POST PROCESSING
     # ============================
 
     def _post_process(self, expr: str, light: bool = False, force_smoothing: bool = False) -> str:
-        if light:
-            smooth_prob = 0.25
-            raw_rank_prob = getattr(config, "REFINEMENT_RAW_RANK_PROB", 0.03)
-        else:
-            smooth_prob = getattr(config, "FRESH_FORCE_SMOOTH_PROB", 0.55)
-            raw_rank_prob = getattr(config, "FRESH_RAW_RANK_PROB", 0.06)
-
+        smooth_prob = getattr(config, "FRESH_FORCE_SMOOTH_PROB", 0.78) if not light else 0.35
         if force_smoothing:
-            smooth_prob = max(smooth_prob, getattr(config, "REFINEMENT_FORCE_SMOOTH_PROB", 0.80))
+            smooth_prob = max(smooth_prob, 0.92)
 
         if self.rng.random() < smooth_prob and not expr.startswith("ts_mean"):
             w = self.rng.choice(getattr(config, "REFINEMENT_SMOOTHING_WINDOWS", [3, 5, 10]))
-            if self.rng.random() < 0.65:
+            if self.rng.random() < 0.75:
                 expr = f"ts_mean(rank({expr}), {w})"
             else:
                 expr = f"rank(ts_mean({expr}, {w}))"
 
+        raw_rank_prob = getattr(config, "FRESH_RAW_RANK_PROB", 0.01) if not light else 0.02
         if self.rng.random() < raw_rank_prob:
             if not expr.startswith("rank("):
                 expr = f"rank({expr})"
+
+        # suppress weak fresh/reactive raw forms
+        weak_raw = (
+            expr.startswith("rank(-ts_delta(")
+            or expr.startswith("rank(ts_mean(close,")
+            or expr.startswith("rank(-(close / ts_mean(")
+            or expr.startswith("rank((volume / ts_mean(")
+        )
+        if weak_raw:
+            expr = f"ts_mean(rank({expr}), 5)"
 
         return expr
 
@@ -304,7 +289,7 @@ class AlphaGenerator:
             if mode == "turnover":
                 out["n"] = self._push_param_wider(out["n"], grid)
             elif mode == "fitness":
-                if self.rng.random() < 0.70:
+                if self.rng.random() < 0.65:
                     out["n"] = self._push_param_wider(out["n"], grid)
                 else:
                     out["n"] = self._mutate_neighbor(out["n"], grid)
@@ -377,12 +362,13 @@ class AlphaGenerator:
         delays = getattr(config, "DEFAULT_DELAYS", [config.DEFAULT_DELAY])
         truncs = getattr(config, "REFINEMENT_TRUNCATIONS", config.DEFAULT_TRUNCATIONS)
 
+        # Decay: strongest lever for fitness / turnover rescue
         if "decay" in out:
             current_decay = int(out["decay"])
             if mode == "turnover":
                 out["decay"] = self._bump_setting_up(current_decay, decays)
             elif mode == "fitness":
-                if self.rng.random() < 0.80:
+                if self.rng.random() < 0.75:
                     out["decay"] = self._bump_setting_up(current_decay, decays)
                 else:
                     out["decay"] = self._mutate_setting_neighbor(current_decay, decays)
@@ -391,35 +377,42 @@ class AlphaGenerator:
             else:
                 out["decay"] = self._mutate_setting_neighbor(current_decay, decays)
 
+        # Universe: smaller / more liquid universes help robustness / turnover for near misses.
         if "universe" in out and len(universes) > 1:
             if mode in {"fitness", "turnover"}:
-                if self.rng.random() < getattr(config, "REFINEMENT_UNIVERSE_SWITCH_PROB", 0.28):
+                if self.rng.random() < getattr(config, "REFINEMENT_UNIVERSE_SWITCH_PROB", 0.35):
                     out["universe"] = self._more_liquid_universe(out["universe"], universes)
-            elif mode == "sharpe" and self.rng.random() < 0.15:
+            elif mode == "sharpe" and self.rng.random() < 0.20:
                 out["universe"] = self._mutate_universe_neighbor(out["universe"], universes)
 
+        # Delay: optional, low probability exploration path.
         if "delay" in out and len(delays) > 1:
-            if mode == "sharpe" and self.rng.random() < getattr(config, "REFINEMENT_DELAY_SWITCH_PROB", 0.0):
+            if mode == "sharpe" and self.rng.random() < getattr(config, "REFINEMENT_DELAY_SWITCH_PROB", 0.10):
+                out["delay"] = self._mutate_setting_neighbor(int(out["delay"]), delays)
+            elif mode in {"fitness", "turnover"} and self.rng.random() < 0.05:
                 out["delay"] = self._mutate_setting_neighbor(int(out["delay"]), delays)
 
-        if "neutralization" in out and self.rng.random() < 0.22:
+        # Neutralization: small, not dominant, but useful.
+        if "neutralization" in out and self.rng.random() < 0.25:
             choices = list(config.DEFAULT_NEUTRALIZATIONS)
             if mode in {"fitness", "turnover"}:
                 out["neutralization"] = self._prefer_stabilizing_neutralization(out["neutralization"], choices)
             else:
                 out["neutralization"] = self.rng.choice(choices)
 
+        # Truncation: tighter for robustness, occasionally looser for return.
         if "truncation" in out and truncs:
             current_trunc = float(out["truncation"])
             if mode in {"fitness", "turnover"}:
-                if self.rng.random() < 0.50:
+                if self.rng.random() < 0.45:
                     out["truncation"] = self._tighter_truncation(current_trunc, truncs)
-            elif mode == "sharpe" and self.rng.random() < 0.15:
+            elif mode == "sharpe" and self.rng.random() < 0.20:
                 out["truncation"] = self._mutate_setting_neighbor(current_trunc, truncs)
 
-        if family in {"fundamental", "conditional"} and self.rng.random() < getattr(config, "REFINEMENT_NAN_EXPERIMENT_PROB", 0.02):
+        # Nan / pasteurization: keep rare and targeted.
+        if family in {"fundamental", "conditional"} and self.rng.random() < getattr(config, "REFINEMENT_NAN_EXPERIMENT_PROB", 0.03):
             out["nan_handling"] = "ON" if str(out.get("nan_handling", "OFF")).upper() == "OFF" else "OFF"
-        if self.rng.random() < getattr(config, "REFINEMENT_PASTEURIZATION_EXPERIMENT_PROB", 0.01):
+        if self.rng.random() < getattr(config, "REFINEMENT_PASTEURIZATION_EXPERIMENT_PROB", 0.02):
             out["pasteurization"] = "OFF" if str(out.get("pasteurization", "ON")).upper() == "ON" else "ON"
 
         return out
@@ -475,8 +468,6 @@ class AlphaGenerator:
     def _prefer_stabilizing_neutralization(self, current: str, choices: list[str]) -> str:
         if "SUBINDUSTRY" in choices and self.rng.random() < 0.65:
             return "SUBINDUSTRY"
-        if "INDUSTRY" in choices and self.rng.random() < 0.20:
-            return "INDUSTRY"
         return self.rng.choice(choices)
 
     def _tighter_truncation(self, current: float, truncs: list[float]) -> float:
@@ -521,7 +512,7 @@ class AlphaGenerator:
                     f"ts_mean(rank(rank(-(close / ts_mean(close, {bigger_n}) - 1))), 5)",
                 ])
             elif mode == "sharpe":
-                if self.rng.random() < getattr(config, "LOW_SHARPE_EXTRA_SIGNAL_PROB", 0.50):
+                if self.rng.random() < getattr(config, "LOW_SHARPE_EXTRA_SIGNAL_PROB", 0.75):
                     candidates.extend([
                         f"ts_mean(rank(rank(-ts_delta(close, {n}))), 3)",
                         f"ts_mean(rank(rank(ts_mean(close, {n}) - close)), 3)",
@@ -529,9 +520,8 @@ class AlphaGenerator:
                     ])
                 else:
                     candidates.extend([
-                        f"rank(-ts_delta(close, {n}))",
-                        f"rank(ts_mean(close, {n}) - close)",
-                        f"rank(-(returns - ts_mean(returns, {n})))",
+                        f"rank(ts_mean(rank(rank(-ts_delta(close, {n}))), 3))",
+                        f"rank(ts_mean(rank(rank(ts_mean(close, {n}) - close)), 3))",
                     ])
 
         elif family == "conditional":
@@ -554,7 +544,6 @@ class AlphaGenerator:
                 ])
             elif mode == "sharpe":
                 candidates.extend([
-                    f"ts_mean(rank(trade_when({cond_volume}, {base_sig}, -1)), 3)",
                     f"trade_when({cond_volume}, rank(-ts_delta(close, {n})), -1)",
                     f"trade_when({cond_abs}, {base_sig}, -1)",
                 ])
@@ -564,7 +553,7 @@ class AlphaGenerator:
                 candidates.extend([
                     f"ts_mean(rank(rank((volume / ts_mean(volume, {n})) * -returns)), 10)",
                     f"rank((volume / ts_mean(volume, {n})) * -returns)",
-                    f"ts_mean(rank(rank((volume / ts_mean(volume, {self._push_param_wider(n)})) * -returns)), 10)",
+                    f"ts_mean(rank(rank(ts_delta(volume, {n}) * returns)), 5)",
                 ])
             elif mode == "turnover":
                 wider_n = self._push_param_wider(n)
@@ -575,7 +564,7 @@ class AlphaGenerator:
             elif mode == "sharpe":
                 candidates.extend([
                     f"ts_mean(rank(rank((volume / ts_mean(volume, {n})) * -returns)), 3)",
-                    f"rank((volume / ts_mean(volume, {n})) * -returns)",
+                    f"rank(ts_mean(rank((volume / ts_mean(volume, {n})) * -returns), 3))",
                 ])
 
         elif family == "vol_adjusted":
@@ -595,7 +584,7 @@ class AlphaGenerator:
             elif mode == "sharpe":
                 candidates.extend([
                     f"ts_mean(rank(rank((ts_mean(close, {n}) - close) / ts_std_dev(returns, {m}))), 3)",
-                    f"rank(ts_delta(close, {n}) / ts_std_dev(returns, {m}))",
+                    f"rank(ts_mean(rank((ts_mean(close, {n}) - close) / ts_std_dev(returns, {m})), 3))",
                 ])
 
         elif family == "fundamental":
