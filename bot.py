@@ -8,6 +8,7 @@ from generator import AlphaGenerator
 from models import Run, new_id, utc_now
 from scheduler import Scheduler
 from storage import Storage
+from similarity import SimilarityEngine
 from brain_client import BrainClient, BrainAPIError
 
 
@@ -35,6 +36,8 @@ class AlphaBot:
 
         self.completed_runs = 0
         self.refinement_attempts_by_base: dict[str, int] = {}
+        self.refinement_local_history: dict[str, list[str]] = {}
+        self.similarity_engine = SimilarityEngine()
 
     # =========================================================
     # Main loop
@@ -125,7 +128,7 @@ class AlphaBot:
         self.storage.insert_metrics(metrics)
 
         decision = evaluate_submission(candidate_id, metrics)
-        self._maybe_queue_refinement(candidate_id, run_id, metrics, decision_should_submit=decision.should_submit)
+        self._maybe_queue_refinement(candidate_id, run_id, metrics)
 
         self.completed_runs += 1
 
@@ -145,13 +148,7 @@ class AlphaBot:
         if self.completed_runs % config.REPORT_EVERY_N_COMPLETIONS == 0:
             self._print_progress_report()
 
-    def _maybe_queue_refinement(
-        self,
-        candidate_id: str,
-        run_id: str,
-        metrics,
-        decision_should_submit: bool = False,
-    ) -> None:
+    def _maybe_queue_refinement(self, candidate_id: str, run_id: str, metrics) -> None:
         sharpe = metrics.sharpe
         fitness = metrics.fitness
         turnover = metrics.turnover
@@ -163,22 +160,42 @@ class AlphaBot:
         if sharpe < min_refinement_sharpe:
             return
 
+        source_stage = None
+        priority = None
+
         if sharpe >= config.NEAR_PASSER_MIN_SHARPE and fitness >= config.NEAR_PASSER_MIN_FITNESS:
             priority = float(sharpe) + float(fitness)
-
             if turnover is not None:
                 priority -= max(0.0, turnover - config.NEAR_PASSER_MAX_TURNOVER)
+            source_stage = "near_passer"
 
+        elif sharpe >= config.FRONTIER_MIN_SHARPE and fitness >= config.FRONTIER_MIN_FITNESS:
+            priority = float(sharpe) + float(fitness)
+            if turnover is not None:
+                priority -= 0.50 * max(0.0, float(turnover) - config.NEAR_PASSER_MAX_TURNOVER)
+            source_stage = "frontier"
+
+        elif sharpe >= config.FRONTIER_ALT_MIN_SHARPE and fitness >= config.FRONTIER_ALT_MIN_FITNESS:
+            priority = float(sharpe) + float(fitness)
+            if turnover is not None:
+                priority -= 0.70 * max(0.0, float(turnover) - config.NEAR_PASSER_MAX_TURNOVER)
+            source_stage = "frontier_alt"
+
+        if source_stage is not None:
             self.storage.add_refinement_candidate(
                 candidate_id=candidate_id,
                 run_id=run_id,
                 priority=priority,
-                reason=metrics.fail_reason or "near_passer",
+                reason=metrics.fail_reason or source_stage,
                 created_at=utc_now(),
+                source_stage=source_stage,
+                base_sharpe=sharpe,
+                base_fitness=fitness,
+                base_turnover=turnover,
             )
             print(
                 f"[QUEUED_REFINEMENT] run_id={run_id} candidate_id={candidate_id} "
-                f"priority={priority:.3f} reason={metrics.fail_reason}"
+                f"priority={priority:.3f} reason={metrics.fail_reason} stage={source_stage}"
             )
 
     def _attempt_submission(self, candidate_id: str, run_id: str, result: dict) -> None:
@@ -359,6 +376,11 @@ class AlphaBot:
         return True
 
     def _candidate_allowed_by_diversity(self, candidate, is_refinement: bool) -> bool:
+        if candidate.template_id in getattr(config, "STRONG_TEMPLATES", set()):
+            if is_refinement:
+                return True
+            return self.generator.rng.random() < 0.92
+
         stats = self.storage.get_recent_template_stats(limit=config.DIVERSITY_LOOKBACK_RUNS)
         template_stats = None
         for row in stats:
@@ -393,6 +415,36 @@ class AlphaBot:
 
         penalty_prob = max(0.15, 1.0 - 0.08 * (n_runs - config.RELAXED_TEMPLATE_COUNT))
         return self.generator.rng.random() < penalty_prob
+
+    def _passes_local_refinement_filter(self, base_candidate_id: str, candidate) -> bool:
+        history = self.refinement_local_history.get(base_candidate_id, [])
+        if candidate.expression_hash in history:
+            return False
+
+        base_row = self.storage.get_candidate_by_id(base_candidate_id)
+        if base_row is not None:
+            result = self.similarity_engine.max_similarity_against_rows(candidate, [base_row])
+            if result.score >= config.LOCAL_REFINEMENT_MAX_SIMILARITY:
+                return False
+
+        if history:
+            rows = []
+            for expr_hash in history:
+                row = self.storage.get_candidate_by_hash(expr_hash)
+                if row is not None:
+                    rows.append(row)
+            if rows:
+                result = self.similarity_engine.max_similarity_against_rows(candidate, rows)
+                if result.score >= config.LOCAL_REFINEMENT_MAX_SIMILARITY:
+                    return False
+
+        return True
+
+    def _remember_local_refinement(self, base_candidate_id: str, expression_hash: str) -> None:
+        history = self.refinement_local_history.get(base_candidate_id, [])
+        history.append(expression_hash)
+        keep = getattr(config, "LOCAL_REFINEMENT_HISTORY", 6)
+        self.refinement_local_history[base_candidate_id] = history[-keep:]
 
     # =========================================================
     # Candidate selection
@@ -434,7 +486,9 @@ class AlphaBot:
         return None
 
     def _get_candidate_with_refinement_priority(self):
-        for _ in range(6):
+        last_base_tried = None
+
+        for _ in range(8):
             refinement_row = None
 
             if self.generator.rng.random() < config.REFINEMENT_PROBABILITY:
@@ -442,6 +496,14 @@ class AlphaBot:
 
             if refinement_row is not None:
                 base_candidate_id = refinement_row["candidate_id"]
+
+                # Avoid hammering the same base in a single tick
+                if base_candidate_id == last_base_tried:
+                    fresh = self._fresh_candidate()
+                    if fresh is not None:
+                        return fresh
+                    continue
+                last_base_tried = base_candidate_id
 
                 if self._should_abandon_refinement_base(base_candidate_id):
                     self.storage.mark_refinement_consumed(base_candidate_id)
@@ -452,7 +514,12 @@ class AlphaBot:
                     )
                     continue
 
-                candidate = self.generator.mutate_candidate(refinement_row)
+                metrics_hint = {
+                    "sharpe": refinement_row["base_sharpe"],
+                    "fitness": refinement_row["base_fitness"],
+                    "turnover": refinement_row["base_turnover"],
+                }
+                candidate = self.generator.mutate_candidate(refinement_row, metrics_hint=metrics_hint)
                 self.refinement_attempts_by_base[base_candidate_id] = (
                     self.refinement_attempts_by_base.get(base_candidate_id, 0) + 1
                 )
@@ -465,6 +532,9 @@ class AlphaBot:
                 )
 
                 if self.storage.candidate_exists(candidate.expression_hash):
+                    continue
+
+                if not self._passes_local_refinement_filter(base_candidate_id, candidate):
                     continue
 
                 if not self._candidate_allowed_by_template_quality(candidate, is_refinement=True):
@@ -481,8 +551,8 @@ class AlphaBot:
                     )
                     continue
 
-                self.storage.mark_refinement_consumed(base_candidate_id)
-                self.refinement_attempts_by_base.pop(base_candidate_id, None)
+                # Don't consume base — let it be retried until attempts exhausted
+                self._remember_local_refinement(base_candidate_id, candidate.expression_hash)
                 return candidate
 
             fresh = self._fresh_candidate()

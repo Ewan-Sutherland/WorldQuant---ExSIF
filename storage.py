@@ -115,6 +115,10 @@ class Storage:
                     reason TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     consumed INTEGER NOT NULL DEFAULT 0,
+                    source_stage TEXT DEFAULT 'unknown',
+                    base_sharpe REAL,
+                    base_fitness REAL,
+                    base_turnover REAL,
                     FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id),
                     FOREIGN KEY(run_id) REFERENCES runs(run_id)
                 );
@@ -122,6 +126,10 @@ class Storage:
             )
 
             self._ensure_column(conn, "runs", "alpha_id", "alpha_id TEXT")
+            self._ensure_column(conn, "refinement_queue", "source_stage", "source_stage TEXT DEFAULT 'unknown'")
+            self._ensure_column(conn, "refinement_queue", "base_sharpe", "base_sharpe REAL")
+            self._ensure_column(conn, "refinement_queue", "base_fitness", "base_fitness REAL")
+            self._ensure_column(conn, "refinement_queue", "base_turnover", "base_turnover REAL")
 
             conn.execute(
                 """
@@ -361,6 +369,10 @@ class Storage:
         priority: float,
         reason: str,
         created_at: datetime,
+        source_stage: str = "unknown",
+        base_sharpe: float | None = None,
+        base_fitness: float | None = None,
+        base_turnover: float | None = None,
     ) -> None:
         with self.connect() as conn:
             conn.execute(
@@ -371,8 +383,12 @@ class Storage:
                     priority,
                     reason,
                     created_at,
-                    consumed
-                ) VALUES (?, ?, ?, ?, ?, 0)
+                    consumed,
+                    source_stage,
+                    base_sharpe,
+                    base_fitness,
+                    base_turnover
+                ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
                 """,
                 (
                     candidate_id,
@@ -380,6 +396,10 @@ class Storage:
                     priority,
                     reason,
                     dt_to_str(created_at),
+                    source_stage,
+                    base_sharpe,
+                    base_fitness,
+                    base_turnover,
                 ),
             )
 
@@ -398,7 +418,11 @@ class Storage:
                     c.settings_json,
                     c.expression,
                     c.canonical_expression,
-                    c.expression_hash
+                    c.expression_hash,
+                    rq.source_stage,
+                    rq.base_sharpe,
+                    rq.base_fitness,
+                    rq.base_turnover
                 FROM refinement_queue rq
                 JOIN candidates c
                     ON rq.candidate_id = c.candidate_id
@@ -671,3 +695,28 @@ class Storage:
                 (limit,),
             ).fetchall()
             return rows
+
+
+    def get_refinement_report(self, limit: int = 250) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    c.template_id AS base_template_id,
+                    c.family AS family,
+                    rq.source_stage AS source_stage,
+                    COUNT(*) AS queued_count,
+                    AVG(rq.base_sharpe) AS avg_base_sharpe,
+                    AVG(rq.base_fitness) AS avg_base_fitness,
+                    AVG(rq.base_turnover) AS avg_base_turnover
+                FROM refinement_queue rq
+                JOIN candidates c ON rq.candidate_id = c.candidate_id
+                ORDER BY rq.created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return rows
+
+    def get_submitted_alphas(self, *, limit: int = 300) -> list[sqlite3.Row]:
+        return self.get_submitted_candidate_rows(limit=limit)

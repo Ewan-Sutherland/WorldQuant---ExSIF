@@ -79,7 +79,7 @@ class AlphaGenerator:
         settings = self._mutate_settings(settings, mode=mode)
 
         expr, fields = self._render(chosen_template["expression"], params)
-        expr = self._apply_refinement_variants(
+        expr, realized_template_id = self._apply_refinement_variants(
             expr=expr,
             family=family,
             template_id=chosen_template["template_id"],
@@ -87,10 +87,11 @@ class AlphaGenerator:
             mode=mode,
             metrics_hint=metrics_hint,
         )
+        final_template_id = realized_template_id or chosen_template["template_id"]
         expr = self._post_process(
             expr,
             family=family,
-            template_id=chosen_template["template_id"],
+            template_id=final_template_id,
             light=True,
             force_smoothing=(mode in {"fitness", "turnover"}),
         )
@@ -302,20 +303,24 @@ class AlphaGenerator:
     # ============================
 
     def _post_process(self, expr, family=None, template_id=None, light=False, force_smoothing: bool = False):
-        if expr.count("rank(") >= 3 or expr.count("ts_mean(") >= 3:
+        if expr.count("rank(") >= 3 or expr.count("ts_mean(") >= 3 or expr.count("ts_decay_linear(") >= 2:
             return expr
 
         if force_smoothing:
-            smoothing_prob = 0.45
+            smoothing_prob = 0.60
         elif light:
             smoothing_prob = getattr(config, "LIGHT_POST_PROCESS_SMOOTH_PROB", 0.30)
         else:
             smoothing_prob = getattr(config, "FRESH_FORCE_SMOOTH_PROB", 0.72)
 
-        if self.rng.random() < smoothing_prob and not expr.startswith("ts_mean("):
+        if self.rng.random() < smoothing_prob and not expr.startswith("ts_mean(") and not expr.startswith("ts_decay_linear("):
             win_choices = getattr(config, "PREFER_TS_MEAN_WINDOW", [3, 5])
             win = self.rng.choice(win_choices if light else [3, 5, 10])
-            expr = f"ts_mean(rank({expr}), {win})"
+            # Use ts_decay_linear ~40% of the time — better signal preservation
+            if self.rng.random() < 0.40:
+                expr = f"ts_decay_linear(rank({expr}), {win})"
+            else:
+                expr = f"ts_mean(rank({expr}), {win})"
 
         rank_prob = getattr(config, "FRESH_RAW_RANK_PROB", 0.02) if not light else 0.05
         if self.rng.random() < rank_prob and not expr.startswith("rank("):
@@ -351,7 +356,11 @@ class AlphaGenerator:
             if mode == "turnover":
                 out["n"] = self._push_param_wider(out["n"], grid_n)
             elif mode == "fitness":
-                out["n"] = self._mutate(out["n"], grid_n, stay_prob=0.15)
+                turnover = self._safe_float((metrics_hint or {}).get("turnover"))
+                if turnover is not None and turnover > 0.45:
+                    out["n"] = self._push_param_wider(out["n"], grid_n)
+                else:
+                    out["n"] = self._mutate(out["n"], grid_n, stay_prob=0.10)
             elif mode == "sharpe":
                 out["n"] = self._mutate(out["n"], grid_n, stay_prob=0.10)
             else:
@@ -363,6 +372,8 @@ class AlphaGenerator:
         if "m" in out:
             if mode == "turnover":
                 out["m"] = self._push_param_wider(out["m"], grid_m)
+            elif mode == "fitness":
+                out["m"] = self._push_param_wider(out["m"], grid_m) if self.rng.random() < 0.65 else self._mutate(out["m"], grid_m, stay_prob=0.10)
             else:
                 out["m"] = self._mutate(out["m"], grid_m, stay_prob=0.20)
 
@@ -435,10 +446,14 @@ class AlphaGenerator:
             else:
                 out["decay"] = self._mutate(out["decay"], decay_grid, stay_prob=0.25)
 
-        if "neutralization" in out and self.rng.random() < 0.18:
+        # More aggressive neutralization mutation for fitness
+        neut_prob = 0.40 if mode == "fitness" else (0.25 if mode == "turnover" else 0.18)
+        if "neutralization" in out and self.rng.random() < neut_prob:
             out["neutralization"] = self.rng.choice(config.DEFAULT_NEUTRALIZATIONS)
 
-        if "truncation" in out and self.rng.random() < 0.08:
+        # Actually mutate truncation — it matters for fitness and turnover
+        trunc_prob = 0.30 if mode in {"fitness", "turnover"} else 0.08
+        if "truncation" in out and self.rng.random() < trunc_prob:
             out["truncation"] = self.rng.choice(config.DEFAULT_TRUNCATIONS)
 
         return out
@@ -462,6 +477,38 @@ class AlphaGenerator:
     # RENDER / VARIANTS
     # ============================
 
+    def _classify_expression_template(self, family: str, expr: str, fallback_template_id: str) -> str:
+        expr_no_space = expr.replace(" ", "")
+        if family == "volume_flow":
+            if "*-returns" in expr_no_space or "*-returns)" in expr_no_space or "*-returns," in expr_no_space or "*-returns" in expr_no_space:
+                return "vol_03"
+            if "ts_delta(volume" in expr:
+                return "vol_02"
+            if "volume/ts_mean(volume" in expr_no_space:
+                return "vol_01"
+        if family == "mean_reversion":
+            if "returns-ts_mean(returns" in expr_no_space:
+                return "mr_04"
+            if "close/ts_mean(close" in expr_no_space:
+                return "mr_03"
+            if "-ts_delta(close" in expr_no_space:
+                return "mr_02"
+            if "ts_mean(close" in expr_no_space and "-close" in expr_no_space:
+                return "mr_01"
+        if family == "vol_adjusted":
+            if "ts_mean(close" in expr_no_space and "/ts_std_dev(returns" in expr_no_space:
+                return "va_02"
+            if "ts_delta(close" in expr_no_space and "/ts_std_dev(returns" in expr_no_space:
+                return "va_01"
+        if family == "conditional":
+            if "rank(-returns)" in expr and "volume > ts_mean(volume" in expr:
+                return "cond_01"
+            if "abs(returns) > ts_std_dev(returns" in expr:
+                return "cond_02"
+            if "rank(ts_delta(close" in expr and "volume > ts_mean(volume" in expr:
+                return "cond_03"
+        return fallback_template_id
+
     def _apply_refinement_variants(
         self,
         *,
@@ -471,7 +518,7 @@ class AlphaGenerator:
         params: dict[str, Any],
         mode: str,
         metrics_hint: dict[str, Any] | None = None,
-    ) -> str:
+    ) -> tuple[str, str | None]:
         metrics_hint = metrics_hint or {}
         n = params.get("n", 10)
         m = params.get("m", 10)
@@ -490,20 +537,26 @@ class AlphaGenerator:
         if family == "mean_reversion":
             if mode == "fitness":
                 add(f"ts_mean(rank(rank(-(returns - ts_mean(returns, {wider_n})))), 10)", 1.35)
+                add(f"ts_decay_linear(rank(rank(-(returns - ts_mean(returns, {wider_n})))), 10)", 1.40)
                 add(f"ts_mean(rank(rank(-(returns - ts_mean(returns, {n})))), 10)", 1.20)
+                add(f"ts_decay_linear(rank(rank(-(returns - ts_mean(returns, {n})))), 5)", 1.25)
                 add(f"ts_mean(rank(rank(ts_mean(close, {wider_n}) - close)), 5)", 1.10)
                 add(f"rank(ts_mean(rank(rank(-(returns - ts_mean(returns, {n})))), 3))", 0.90)
             elif mode == "turnover":
                 add(f"ts_mean(rank(rank(-(returns - ts_mean(returns, {wider_n})))), 10)", 1.35)
+                add(f"ts_decay_linear(rank(rank(-(returns - ts_mean(returns, {wider_n})))), 10)", 1.40)
                 add(f"ts_mean(rank(rank(-(close / ts_mean(close, {wider_n}) - 1))), 5)", 1.15)
+                add(f"ts_decay_linear(rank(rank(-ts_delta(close, {wider_n}))), 10)", 1.10)
                 add(f"ts_mean(rank(rank(-ts_delta(close, {wider_n}))), 10)", 1.05)
             elif mode == "sharpe":
                 add(f"ts_mean(rank(rank(-(returns - ts_mean(returns, {n})))), 3)", 1.35)
+                add(f"ts_decay_linear(rank(rank(-(returns - ts_mean(returns, {n})))), 3)", 1.30)
                 add(f"ts_mean(rank(rank(ts_mean(close, {n}) - close)), 3)", 1.20)
                 add(f"rank(ts_mean(rank(rank(-ts_delta(close, {n}))), 3))", 1.00)
                 add(f"ts_mean(rank(rank(-(returns - ts_mean(returns, {narrower_n})))), 3)", 0.95)
             else:
                 add(f"ts_mean(rank(rank(-(returns - ts_mean(returns, {n})))), 5)", 1.10)
+                add(f"ts_decay_linear(rank(rank(-(returns - ts_mean(returns, {n})))), 5)", 1.15)
                 add(f"ts_mean(rank(rank(ts_mean(close, {n}) - close)), 5)", 1.00)
 
         elif family == "conditional":
@@ -514,39 +567,50 @@ class AlphaGenerator:
             if mode == "fitness":
                 add(f"trade_when({cond_tight}, {base_sig}, -1)", 1.15)
                 add(f"ts_mean(rank(trade_when({cond_tight}, {base_sig}, -1)), 5)", 1.30)
+                add(f"ts_decay_linear(rank(trade_when({cond_tight}, {base_sig}, -1)), 5)", 1.35)
                 add(f"trade_when({cond_abs}, {base_sig}, -1)", 1.00)
             elif mode == "turnover":
                 cond_wider = f"volume > ts_mean(volume, {wider_n}) * 1.1"
                 add(f"trade_when({cond_wider}, {base_sig}, -1)", 1.20)
                 add(f"ts_mean(rank(trade_when({cond_wider}, {base_sig}, -1)), 10)", 1.35)
+                add(f"ts_decay_linear(rank(trade_when({cond_wider}, {base_sig}, -1)), 10)", 1.40)
             elif mode == "sharpe":
                 add(f"ts_mean(rank(trade_when({cond_volume}, {base_sig}, -1)), 3)", 1.30)
+                add(f"ts_decay_linear(rank(trade_when({cond_volume}, {base_sig}, -1)), 3)", 1.25)
                 add(f"trade_when({cond_volume}, rank(-ts_delta(close, {n})), -1)", 1.00)
                 add(f"trade_when({cond_abs}, {base_sig}, -1)", 0.95)
             else:
                 add(f"ts_mean(rank(trade_when({cond_volume}, {base_sig}, -1)), 5)", 1.10)
+                add(f"ts_decay_linear(rank(trade_when({cond_volume}, {base_sig}, -1)), 5)", 1.15)
 
         elif family == "volume_flow":
             if mode == "fitness":
                 add(f"ts_mean(rank(rank((volume / ts_mean(volume, {wider_n})) * -returns)), 10)", 1.35)
+                add(f"ts_decay_linear(rank(rank((volume / ts_mean(volume, {wider_n})) * -returns)), 10)", 1.40)
                 add(f"rank(ts_mean(rank((volume / ts_mean(volume, {n})) * -returns), 5))", 1.05)
                 add(f"ts_mean(rank(rank((volume / ts_mean(volume, {wider_n})) * -returns)), 5)", 1.10)
+                add(f"ts_decay_linear(rank(rank((volume / ts_mean(volume, {wider_n})) * -returns)), 5)", 1.15)
             elif mode == "turnover":
                 add(f"ts_mean(rank(rank((volume / ts_mean(volume, {wider_n})) * -returns)), 10)", 1.35)
+                add(f"ts_decay_linear(rank(rank((volume / ts_mean(volume, {wider_n})) * -returns)), 10)", 1.45)
                 add(f"trade_when(abs(returns) > ts_std_dev(returns, {wider_n}), rank((volume / ts_mean(volume, {wider_n})) * -returns), -1)", 1.10)
             elif mode == "sharpe":
                 add(f"ts_mean(rank(rank((volume / ts_mean(volume, {n})) * -returns)), 3)", 1.30)
+                add(f"ts_decay_linear(rank(rank((volume / ts_mean(volume, {n})) * -returns)), 3)", 1.25)
                 add(f"rank(ts_mean(rank((volume / ts_mean(volume, {n})) * -returns), 3))", 1.05)
                 add(f"ts_mean(rank(rank((volume / ts_mean(volume, {narrower_n})) * -returns)), 3)", 0.90)
             else:
                 add(f"ts_mean(rank(rank((volume / ts_mean(volume, {n})) * -returns)), 5)", 1.10)
+                add(f"ts_decay_linear(rank(rank((volume / ts_mean(volume, {n})) * -returns)), 5)", 1.15)
 
         elif family == "vol_adjusted":
             if mode == "fitness":
                 add(f"ts_mean(rank(rank((ts_mean(close, {wider_n}) - close) / ts_std_dev(returns, {wider_m}))), 5)", 1.30)
+                add(f"ts_decay_linear(rank(rank((ts_mean(close, {wider_n}) - close) / ts_std_dev(returns, {wider_m}))), 5)", 1.35)
                 add(f"rank(ts_mean(rank((ts_mean(close, {wider_n}) - close) / ts_std_dev(returns, {wider_m})), 5))", 1.00)
             elif mode == "turnover":
                 add(f"ts_mean(rank(rank((ts_mean(close, {wider_n}) - close) / ts_std_dev(returns, {wider_m}))), 10)", 1.35)
+                add(f"ts_decay_linear(rank(rank((ts_mean(close, {wider_n}) - close) / ts_std_dev(returns, {wider_m}))), 10)", 1.40)
             elif mode == "sharpe":
                 add(f"ts_mean(rank(rank((ts_mean(close, {n}) - close) / ts_std_dev(returns, {m}))), 3)", 1.30)
                 add(f"rank(ts_mean(rank((ts_mean(close, {narrower_n}) - close) / ts_std_dev(returns, {narrower_m})), 3))", 1.00)
@@ -563,13 +627,16 @@ class AlphaGenerator:
         simple_candidates = []
         simple_weights = []
         for candidate, weight in zip(deduped, deduped_weights):
-            if candidate.count("ts_mean(") <= 2 and candidate.count("rank(") <= 4:
+            smooth_count = candidate.count("ts_mean(") + candidate.count("ts_decay_linear(")
+            if smooth_count <= 2 and candidate.count("rank(") <= 4:
                 simple_candidates.append(candidate)
                 simple_weights.append(weight)
 
         pool = simple_candidates or deduped
         pool_weights = simple_weights or deduped_weights
-        return self.rng.choices(pool, weights=pool_weights, k=1)[0]
+        chosen = self.rng.choices(pool, weights=pool_weights, k=1)[0]
+        realized_template_id = self._classify_expression_template(family=family, expr=chosen, fallback_template_id=template_id)
+        return chosen, realized_template_id
 
     def _render(self, template, params):
         expr = template.format(**params)
