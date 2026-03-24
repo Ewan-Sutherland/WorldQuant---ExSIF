@@ -66,7 +66,7 @@ RELAXED_TEMPLATE_COUNT = 14
 RELAXED_TEMPLATE_MIN_AVG_SHARPE = 1.30
 RELAXED_TEMPLATE_MIN_AVG_FITNESS = 0.70
 DIVERSITY_EXPLORATION_PROBABILITY = 0.12
-MAX_REFINEMENT_ATTEMPTS_PER_BASE = 10
+MAX_REFINEMENT_ATTEMPTS_PER_BASE = 7
 LOCAL_REFINEMENT_HISTORY = 10
 LOCAL_REFINEMENT_MAX_SIMILARITY = 0.90
 
@@ -85,6 +85,13 @@ SOFT_PRUNE_REFINEMENT_PROBABILITY = 0.35
 
 # Submission behaviour
 AUTO_SUBMIT = False
+
+# Submission diversity / self-correlation avoidance
+# Structural similarity threshold: if candidate > this vs any submitted alpha, flag as correlated
+# This is a PROXY for PnL correlation — structural sim 0.50+ typically means PnL corr > 0.70
+SUBMISSION_MAX_SIMILARITY = 0.52
+# Boost factor for families NOT yet represented in submissions
+UNSUBMITTED_FAMILY_BOOST = 1.60
 
 # Logging / reporting
 REPORT_EVERY_N_COMPLETIONS = 25

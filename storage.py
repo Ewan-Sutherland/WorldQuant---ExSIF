@@ -720,3 +720,72 @@ class Storage:
 
     def get_submitted_alphas(self, *, limit: int = 300) -> list[sqlite3.Row]:
         return self.get_submitted_candidate_rows(limit=limit)
+
+    def register_manual_submission(self, expression_hash: str, alpha_id: str | None = None) -> bool:
+        """
+        Register a manually submitted alpha (submitted via WQ UI, not AUTO_SUBMIT).
+        Looks up the candidate by expression hash and creates a submission record.
+        Returns True if successful, False if candidate not found.
+        """
+        candidate_row = self.get_candidate_by_hash(expression_hash)
+        if candidate_row is None:
+            return False
+
+        candidate_id = candidate_row["candidate_id"]
+
+        # Find the most recent completed run for this candidate
+        with self.connect() as conn:
+            run_row = conn.execute(
+                """
+                SELECT run_id
+                FROM runs
+                WHERE candidate_id = ? AND status = 'completed'
+                ORDER BY completed_at DESC
+                LIMIT 1
+                """,
+                (candidate_id,),
+            ).fetchone()
+
+        if run_row is None:
+            return False
+
+        from models import new_id, utc_now
+
+        self.insert_submission(
+            submission_id=new_id("sub"),
+            candidate_id=candidate_id,
+            run_id=run_row["run_id"],
+            submitted_at=utc_now(),
+            submission_status="submitted",
+            message="manually_registered",
+        )
+        return True
+
+    def register_manual_submission_by_candidate_id(self, candidate_id: str) -> bool:
+        """Register a manual submission by candidate_id directly."""
+        with self.connect() as conn:
+            run_row = conn.execute(
+                """
+                SELECT run_id
+                FROM runs
+                WHERE candidate_id = ? AND status = 'completed'
+                ORDER BY completed_at DESC
+                LIMIT 1
+                """,
+                (candidate_id,),
+            ).fetchone()
+
+        if run_row is None:
+            return False
+
+        from models import new_id, utc_now
+
+        self.insert_submission(
+            submission_id=new_id("sub"),
+            candidate_id=candidate_id,
+            run_id=run_row["run_id"],
+            submitted_at=utc_now(),
+            submission_status="submitted",
+            message="manually_registered",
+        )
+        return True

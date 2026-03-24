@@ -142,8 +142,32 @@ class AlphaBot:
             f"eligible={decision.should_submit} reason={decision.reason}"
         )
 
-        if decision.should_submit and config.AUTO_SUBMIT:
-            self._attempt_submission(candidate_id, run_id, result)
+        # When eligible, check portfolio fit before submission
+        if decision.should_submit:
+            portfolio_check = self._check_submission_portfolio_fit(
+                candidate_id=candidate_id,
+                run_id=run_id,
+                sharpe=metrics.sharpe,
+            )
+
+            if portfolio_check["fits"]:
+                print(
+                    f"[ELIGIBLE_DIVERSE] run_id={run_id} candidate_id={candidate_id} "
+                    f"max_sim={portfolio_check['max_similarity']:.3f} "
+                    f"sharpe_margin={portfolio_check.get('sharpe_margin', 'n/a')} "
+                    f"READY TO SUBMIT"
+                )
+                if config.AUTO_SUBMIT:
+                    self._attempt_submission(candidate_id, run_id, result)
+            else:
+                print(
+                    f"[ELIGIBLE_CORRELATED] run_id={run_id} candidate_id={candidate_id} "
+                    f"max_sim={portfolio_check['max_similarity']:.3f} "
+                    f"vs_submitted={portfolio_check.get('ref_candidate_id', '?')} "
+                    f"ref_family={portfolio_check.get('ref_family', '?')} "
+                    f"reason={portfolio_check['reason']} "
+                    f"SKIPPING — would likely fail self-correlation"
+                )
 
         if self.completed_runs % config.REPORT_EVERY_N_COMPLETIONS == 0:
             self._print_progress_report()
@@ -154,6 +178,10 @@ class AlphaBot:
         turnover = metrics.turnover
 
         if sharpe is None or fitness is None:
+            return
+
+        # Don't refine alphas that already pass — that wastes sim slots
+        if metrics.submit_eligible:
             return
 
         min_refinement_sharpe = getattr(config, "MIN_REFINEMENT_SHARPE", 1.20)
@@ -230,6 +258,91 @@ class AlphaBot:
                 message=str(exc),
             )
             print(f"[SUBMIT_FAILED] run_id={run_id} alpha_id={alpha_id} error={exc}")
+
+    def _check_submission_portfolio_fit(
+        self,
+        candidate_id: str,
+        run_id: str,
+        sharpe: float | None,
+    ) -> dict:
+        """
+        Check if an eligible candidate is structurally diverse enough
+        from already-submitted alphas to likely pass self-correlation.
+
+        Uses structural similarity as a proxy for PnL correlation:
+        - same family + same template + similar params → high PnL correlation
+        - different family or different data fields → likely low correlation
+
+        WQ rule: self-correlation < 0.7 OR Sharpe ≥ 10% better than correlated alpha.
+        """
+        submitted_rows = self.storage.get_submitted_candidate_rows(limit=300)
+
+        if not submitted_rows:
+            return {"fits": True, "max_similarity": 0.0, "reason": "no_prior_submissions"}
+
+        candidate_row = self.storage.get_candidate_by_id(candidate_id)
+        if candidate_row is None:
+            return {"fits": True, "max_similarity": 0.0, "reason": "candidate_not_found"}
+
+        # Use signature_from_row for both sides — works directly with DB rows
+        cand_sig = self.similarity_engine.signature_from_row(candidate_row)
+
+        best_score = 0.0
+        best_ref_row = None
+        best_ref_sig = None
+
+        for ref_row in submitted_rows:
+            ref_sig = self.similarity_engine.signature_from_row(ref_row)
+            score = self.similarity_engine.pair_similarity(cand_sig, ref_sig)
+            if score > best_score:
+                best_score = score
+                best_ref_row = ref_row
+                best_ref_sig = ref_sig
+
+        max_sim = best_score
+        threshold = getattr(config, "SUBMISSION_MAX_SIMILARITY", 0.52)
+
+        if max_sim < threshold or best_ref_row is None:
+            return {
+                "fits": True,
+                "max_similarity": max_sim,
+                "reason": "diverse_enough",
+            }
+
+        # Structurally similar — check Sharpe margin (WQ 10% rule)
+        ref_sharpe = best_ref_row["sharpe"] if best_ref_row is not None else None
+        ref_cid = best_ref_row["candidate_id"] if best_ref_row is not None else None
+        ref_fam = best_ref_row["family"] if best_ref_row is not None else None
+        ref_tid = best_ref_row["template_id"] if best_ref_row is not None else None
+
+        if sharpe is not None and ref_sharpe is not None and sharpe >= float(ref_sharpe) * 1.10:
+            return {
+                "fits": True,
+                "max_similarity": max_sim,
+                "reason": f"sharpe_override ({sharpe:.3f} >= {float(ref_sharpe):.3f}*1.10)",
+                "sharpe_margin": f"{sharpe:.3f} vs {float(ref_sharpe):.3f}",
+                "ref_candidate_id": ref_cid,
+                "ref_family": ref_fam,
+            }
+
+        return {
+            "fits": False,
+            "max_similarity": max_sim,
+            "reason": f"too_similar (sim={max_sim:.3f} >= {threshold:.2f})",
+            "ref_candidate_id": ref_cid,
+            "ref_family": ref_fam,
+            "ref_template_id": ref_tid,
+        }
+
+    def _get_submitted_family_set(self) -> set[str]:
+        """Return set of families that have been successfully submitted."""
+        submitted_rows = self.storage.get_submitted_candidate_rows(limit=300)
+        return {row["family"] for row in submitted_rows if row.get("family")}
+
+    def _get_submitted_template_set(self) -> set[str]:
+        """Return set of template_ids that have been successfully submitted."""
+        submitted_rows = self.storage.get_submitted_candidate_rows(limit=300)
+        return {row["template_id"] for row in submitted_rows if row.get("template_id")}
 
     # =========================================================
     # Stats / scoring maps
@@ -308,6 +421,14 @@ class AlphaBot:
                 avg_turnover=row["avg_turnover"],
                 n_runs=row["n_runs"],
             )
+
+        # Submission diversity: boost families NOT yet represented in submissions
+        submitted_families = self._get_submitted_family_set()
+        if submitted_families:
+            diversity_boost = getattr(config, "UNSUBMITTED_FAMILY_BOOST", 1.60)
+            for family in bias:
+                if family not in submitted_families and family not in {"momentum", "fundamental"}:
+                    bias[family] *= diversity_boost
 
         return bias
 
@@ -738,5 +859,21 @@ class AlphaBot:
             shown += 1
             if shown >= 12:
                 break
+
+        # Submission portfolio status
+        submitted_families = self._get_submitted_family_set()
+        submitted_templates = self._get_submitted_template_set()
+        eligible_rows = self.storage.get_submission_eligible_candidates(limit=50)
+
+        print(f"\n[REPORT] submission portfolio")
+        print(f"  submitted_families={sorted(submitted_families) if submitted_families else 'none'}")
+        print(f"  submitted_templates={sorted(submitted_templates) if submitted_templates else 'none'}")
+        print(f"  eligible_not_yet_submitted={len(eligible_rows)}")
+
+        # Show which families need eligible alphas for diversity
+        all_productive = {"mean_reversion", "volume_flow", "conditional", "vol_adjusted"}
+        missing = all_productive - submitted_families
+        if missing:
+            print(f"  diversity_gaps={sorted(missing)} — boost these for portfolio diversity")
 
         print()

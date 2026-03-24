@@ -11,12 +11,12 @@ from templates import FUNDAMENTAL_FIELDS, SAFE_PARAM_RANGES, TEMPLATE_LIBRARY
 
 
 DEFAULT_BASE_FAMILY_WEIGHTS = {
-    "mean_reversion": 4.6,
+    "mean_reversion": 3.5,
     "momentum": 0.01,
-    "volume_flow": 1.9,
-    "vol_adjusted": 0.8,
+    "volume_flow": 3.0,
+    "vol_adjusted": 1.2,
     "fundamental": 0.02,
-    "conditional": 1.8,
+    "conditional": 2.2,
 }
 
 
@@ -307,20 +307,34 @@ class AlphaGenerator:
             return expr
 
         if force_smoothing:
-            smoothing_prob = 0.60
+            smoothing_prob = 0.78
         elif light:
             smoothing_prob = getattr(config, "LIGHT_POST_PROCESS_SMOOTH_PROB", 0.30)
         else:
             smoothing_prob = getattr(config, "FRESH_FORCE_SMOOTH_PROB", 0.72)
 
-        if self.rng.random() < smoothing_prob and not expr.startswith("ts_mean(") and not expr.startswith("ts_decay_linear("):
-            win_choices = getattr(config, "PREFER_TS_MEAN_WINDOW", [3, 5])
-            win = self.rng.choice(win_choices if light else [3, 5, 10])
-            # Use ts_decay_linear ~40% of the time — better signal preservation
-            if self.rng.random() < 0.40:
-                expr = f"ts_decay_linear(rank({expr}), {win})"
+        already_smoothed = expr.startswith("ts_mean(") or expr.startswith("ts_decay_linear(")
+        if self.rng.random() < smoothing_prob and not already_smoothed:
+            if force_smoothing:
+                # Fitness/turnover: data shows window=8-10 + ts_decay_linear = best fitness
+                win = self.rng.choice([5, 8, 10, 10])
+                if self.rng.random() < 0.55:
+                    expr = f"ts_decay_linear(rank({expr}), {win})"
+                else:
+                    expr = f"ts_mean(rank({expr}), {win})"
+            elif light:
+                win_choices = getattr(config, "PREFER_TS_MEAN_WINDOW", [3, 5])
+                win = self.rng.choice(win_choices)
+                if self.rng.random() < 0.35:
+                    expr = f"ts_decay_linear(rank({expr}), {win})"
+                else:
+                    expr = f"ts_mean(rank({expr}), {win})"
             else:
-                expr = f"ts_mean(rank({expr}), {win})"
+                win = self.rng.choice([3, 5, 10])
+                if self.rng.random() < 0.40:
+                    expr = f"ts_decay_linear(rank({expr}), {win})"
+                else:
+                    expr = f"ts_mean(rank({expr}), {win})"
 
         rank_prob = getattr(config, "FRESH_RAW_RANK_PROB", 0.02) if not light else 0.05
         if self.rng.random() < rank_prob and not expr.startswith("rank("):
@@ -356,11 +370,19 @@ class AlphaGenerator:
             if mode == "turnover":
                 out["n"] = self._push_param_wider(out["n"], grid_n)
             elif mode == "fitness":
+                # KEY INSIGHT from live data: shorter n + longer smoothing = better fitness
+                # pushing n wider kills sharpe without reliably improving fitness
+                # instead: mutate freely with slight bias toward staying or going shorter
                 turnover = self._safe_float((metrics_hint or {}).get("turnover"))
-                if turnover is not None and turnover > 0.45:
+                if turnover is not None and turnover > 0.55:
+                    # high turnover: wider n is justified here
                     out["n"] = self._push_param_wider(out["n"], grid_n)
                 else:
-                    out["n"] = self._mutate(out["n"], grid_n, stay_prob=0.10)
+                    # normal/low turnover: keep n tight, let smoothing handle fitness
+                    if self.rng.random() < 0.35:
+                        out["n"] = self._push_param_narrower(out["n"], grid_n)
+                    else:
+                        out["n"] = self._mutate(out["n"], grid_n, stay_prob=0.30)
             elif mode == "sharpe":
                 out["n"] = self._mutate(out["n"], grid_n, stay_prob=0.10)
             else:
@@ -536,12 +558,17 @@ class AlphaGenerator:
 
         if family == "mean_reversion":
             if mode == "fitness":
-                add(f"ts_mean(rank(rank(-(returns - ts_mean(returns, {wider_n})))), 10)", 1.35)
-                add(f"ts_decay_linear(rank(rank(-(returns - ts_mean(returns, {wider_n})))), 10)", 1.40)
-                add(f"ts_mean(rank(rank(-(returns - ts_mean(returns, {n})))), 10)", 1.20)
-                add(f"ts_decay_linear(rank(rank(-(returns - ts_mean(returns, {n})))), 5)", 1.25)
-                add(f"ts_mean(rank(rank(ts_mean(close, {wider_n}) - close)), 5)", 1.10)
-                add(f"rank(ts_mean(rank(rank(-(returns - ts_mean(returns, {n})))), 3))", 0.90)
+                # LIVE DATA INSIGHT: eligible alpha was ts_decay_linear(..., n=5, smooth=10)
+                # near-passers at fitness=0.990 were n=10, smooth=5
+                # wider_n (20/40/60) consistently kills sharpe → deprioritise
+                add(f"ts_decay_linear(rank(rank(-(returns - ts_mean(returns, {n})))), 10)", 1.50)
+                add(f"ts_decay_linear(rank(rank(-(returns - ts_mean(returns, {narrower_n})))), 10)", 1.45)
+                add(f"ts_decay_linear(rank(rank(-(returns - ts_mean(returns, {n})))), 8)", 1.35)
+                add(f"ts_mean(rank(rank(-(returns - ts_mean(returns, {n})))), 10)", 1.30)
+                add(f"ts_mean(rank(rank(-(returns - ts_mean(returns, {narrower_n})))), 10)", 1.25)
+                add(f"ts_decay_linear(rank(rank(ts_mean(close, {n}) - close)), 10)", 1.20)
+                add(f"ts_mean(rank(rank(-(returns - ts_mean(returns, {wider_n})))), 10)", 0.80)
+                add(f"rank(ts_mean(rank(rank(-(returns - ts_mean(returns, {n})))), 5))", 0.90)
             elif mode == "turnover":
                 add(f"ts_mean(rank(rank(-(returns - ts_mean(returns, {wider_n})))), 10)", 1.35)
                 add(f"ts_decay_linear(rank(rank(-(returns - ts_mean(returns, {wider_n})))), 10)", 1.40)
