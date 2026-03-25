@@ -18,7 +18,7 @@ import config
 from brain_client import BrainClient
 from canonicalize import canonicalize_expression, hash_candidate
 from models import Candidate, SimulationSettings, Run, Metrics, new_id, utc_now
-from storage import Storage
+from storage_factory import get_storage
 
 
 def _try_endpoint(client, url):
@@ -179,7 +179,7 @@ def main():
 
     client = BrainClient(username=config.BRAIN_USERNAME, password=config.BRAIN_PASSWORD,
                          base_url="https://api.worldquantbrain.com")
-    storage = Storage(config.DB_PATH)
+    storage = get_storage()
 
     if args.manual:
         if not args.expression:

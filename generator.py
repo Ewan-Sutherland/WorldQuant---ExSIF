@@ -80,6 +80,27 @@ class AlphaGenerator:
         metrics_hint = metrics_hint or {}
 
         mode = self._refinement_mode(reason=reason, metrics_hint=metrics_hint)
+
+        # Settings-only refinement: expression is great, only settings need fixing
+        if mode in ("concentrated_weight", "sub_universe_sharpe"):
+            original_expr = row["canonical_expression"]
+            settings = self._mutate_settings(settings, mode=mode, family=family)
+            sim = SimulationSettings(**settings)
+            canon = canonicalize_expression(original_expr)
+            h = hash_candidate(canon, sim.to_dict())
+
+            return Candidate.create(
+                expression=original_expr,
+                canonical_expression=canon,
+                expression_hash=h,
+                template_id=template_id,
+                family=family,
+                fields=self._extract_fields(original_expr, params),
+                params=params,
+                settings=sim,
+            )
+
+        # Normal expression + settings refinement
         chosen_template = self._choose_refinement_template(
             family=family,
             template_id=template_id,
@@ -172,6 +193,10 @@ class AlphaGenerator:
     def _refinement_mode(self, reason: str, metrics_hint: dict[str, Any] | None) -> str:
         txt = (reason or "").upper()
 
+        if "CONCENTRATED_WEIGHT" in txt:
+            return "concentrated_weight"
+        if "LOW_SUB_UNIVERSE_SHARPE" in txt or "SUB_UNIVERSE" in txt:
+            return "sub_universe_sharpe"
         if "LOW_FITNESS" in txt:
             return "fitness"
         if "HIGH_TURNOVER" in txt:
@@ -519,18 +544,28 @@ class AlphaGenerator:
 
         # More aggressive neutralization mutation for fitness
         neut_prob = 0.40 if mode == "fitness" else (0.25 if mode == "turnover" else 0.18)
+        if mode == "concentrated_weight":
+            neut_prob = 0.50
         if "neutralization" in out and self.rng.random() < neut_prob:
             out["neutralization"] = self.rng.choice(config.DEFAULT_NEUTRALIZATIONS)
 
-        # Truncation matters for fitness and turnover
-        trunc_prob = 0.30 if mode in {"fitness", "turnover"} else 0.10
-        if "truncation" in out and self.rng.random() < trunc_prob:
-            out["truncation"] = self.rng.choice(config.DEFAULT_TRUNCATIONS)
+        # Truncation — CRITICAL for concentrated_weight failures
+        if mode == "concentrated_weight":
+            # Force lower truncation to spread weight across more stocks
+            out["truncation"] = self.rng.choice([0.03, 0.05])
+        else:
+            trunc_prob = 0.30 if mode in {"fitness", "turnover"} else 0.10
+            if "truncation" in out and self.rng.random() < trunc_prob:
+                out["truncation"] = self.rng.choice(config.DEFAULT_TRUNCATIONS)
 
-        # Universe swap — sub-universe Sharpe test is a common failure
-        universe_prob = 0.12 if mode == "fitness" else 0.05
-        if "universe" in out and self.rng.random() < universe_prob:
-            out["universe"] = self.rng.choice(config.DEFAULT_UNIVERSES)
+        # Universe — CRITICAL for sub_universe_sharpe failures
+        if mode == "sub_universe_sharpe":
+            # TOPSP500 is smaller/more liquid — better sub-universe Sharpe
+            out["universe"] = "TOPSP500"
+        else:
+            universe_prob = 0.12 if mode == "fitness" else 0.05
+            if "universe" in out and self.rng.random() < universe_prob:
+                out["universe"] = self.rng.choice(config.DEFAULT_UNIVERSES)
 
         return out
 
@@ -756,7 +791,7 @@ class AlphaGenerator:
             return None
 
     def _json_or_dict(self, value):
-        if isinstance(value, dict):
+        if isinstance(value, (dict, list)):
             return value
         if isinstance(value, str):
             return json.loads(value)

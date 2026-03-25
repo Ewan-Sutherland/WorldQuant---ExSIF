@@ -88,9 +88,11 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
 
     # ── NEW: Options / implied volatility ─────────────────────────────
     # IV spread signals from WQ Silver examples
+    # ts_backfill is CRITICAL — IV data has NaN for stocks without liquid options.
+    # Without backfill, rank() concentrates weight into ~600 stocks → fails CONCENTRATED_WEIGHT.
     "options_vol": [
-        {"template_id": "opt_01", "expression": "rank(implied_volatility_call_{opt_window} - implied_volatility_put_{opt_window})"},
-        {"template_id": "opt_02", "expression": "rank(implied_volatility_call_{opt_window} / (historical_volatility_{opt_window} + 0.001))"},
+        {"template_id": "opt_01", "expression": "rank(ts_backfill(implied_volatility_call_{opt_window}, 60) - ts_backfill(implied_volatility_put_{opt_window}, 60))"},
+        {"template_id": "opt_02", "expression": "rank(ts_backfill(implied_volatility_call_{opt_window}, 60) / (ts_backfill(historical_volatility_{opt_window}, 60) + 0.001))"},
     ],
 }
 

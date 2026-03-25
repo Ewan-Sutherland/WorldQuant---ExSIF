@@ -9,7 +9,7 @@ Usage:
 from __future__ import annotations
 import argparse
 import config
-from storage import Storage
+from storage_factory import get_storage
 
 
 def main():
@@ -20,7 +20,7 @@ def main():
     parser.add_argument("--list-submitted", action="store_true", help="List all registered submissions")
     args = parser.parse_args()
 
-    storage = Storage(config.DB_PATH)
+    storage = get_storage()
 
     if args.list_eligible:
         rows = storage.get_submission_eligible_candidates(limit=50)

@@ -6,6 +6,20 @@ from dataclasses import dataclass
 from typing import Any
 
 
+def _safe_json(value, default=None):
+    """Parse JSON that might already be a Python object (Supabase JSONB) or a string (SQLite)."""
+    if value is None:
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return default
+    return default
+
+
 FIELD_TOKENS = {
     "close",
     "returns",
@@ -167,9 +181,9 @@ class SimilarityEngine:
         )
 
     def signature_from_row(self, row) -> CandidateSignature:
-        fields = json.loads(row["fields_json"]) if row["fields_json"] else []
-        params = json.loads(row["params_json"]) if row["params_json"] else {}
-        settings = json.loads(row["settings_json"]) if row["settings_json"] else {}
+        fields = _safe_json(row["fields_json"], [])
+        params = _safe_json(row["params_json"], {})
+        settings = _safe_json(row["settings_json"], {})
 
         canonical_expression = row["canonical_expression"]
         expr_tokens = _tokenize_expression(canonical_expression)

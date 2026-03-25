@@ -37,6 +37,7 @@ class AlphaBot:
         self.completed_runs = 0
         self.refinement_attempts_by_base: dict[str, int] = {}
         self.refinement_local_history: dict[str, list[str]] = {}
+        self.core_signal_exhausted: dict[str, int] = {}  # core_signal → exhaustion count
         self.similarity_engine = SimilarityEngine()
 
     # =========================================================
@@ -188,6 +189,16 @@ class AlphaBot:
         if sharpe < min_refinement_sharpe:
             return
 
+        # Check if this core signal has been exhausted too many times
+        # Prevents the opt_01 problem: 33 different candidates for the same core signal
+        # each getting 7 refinement attempts = 231 wasted sims
+        max_core_exhaustions = getattr(config, "MAX_CORE_SIGNAL_EXHAUSTIONS", 3)
+        candidate_row = self.storage.get_candidate_by_id(candidate_id)
+        if candidate_row:
+            core = self._extract_core_signal(candidate_row.get("canonical_expression", ""))
+            if core and self.core_signal_exhausted.get(core, 0) >= max_core_exhaustions:
+                return  # Silently skip — this core signal has been tried enough
+
         source_stage = None
         priority = None
 
@@ -275,15 +286,19 @@ class AlphaBot:
         sharpe: float | None,
     ) -> dict:
         """
-        Check if an eligible candidate will likely pass WQ's self-correlation test.
+        Predict whether a candidate will pass WQ's self-correlation test.
 
-        WQ measures PnL Pearson correlation against ALL submitted alphas.
+        WQ computes Pearson correlation between daily PnL streams.
         Rule: correlation < 0.7, OR Sharpe >= 10% better than correlated alpha.
 
-        Our proxy uses THREE layers:
-        1. Core signal match — if the inner signal is identical, PnL correlation ~0.8+
-        2. Same family — same family alphas typically correlate 0.5-0.8
-        3. Structural similarity — fallback for cross-family checks
+        We can't compute PnL correlation directly (no daily PnL data from API),
+        so we use a data-source-category proxy based on WQ's own documentation:
+        "The most effective way to reduce correlation is to use unique datasets."
+
+        Tiers (checked in order, stop at first match):
+          1. Same core signal → BLOCK (guaranteed PnL correlation > 0.7)
+          2. Same data source category → BLOCK unless Sharpe 10%+ better
+          3. Different data source category → ALLOW (near-zero PnL correlation)
         """
         submitted_rows = self.storage.get_submitted_candidate_rows(limit=300)
 
@@ -295,23 +310,22 @@ class AlphaBot:
             return {"fits": True, "max_similarity": 0.0, "reason": "candidate_not_found"}
 
         cand_expr = candidate_row["canonical_expression"]
-        cand_family = candidate_row["family"]
         cand_core = self._extract_core_signal(cand_expr)
+        cand_data_cat = self._classify_data_source(cand_expr)
 
-        # Check against EVERY submitted alpha (not just best match)
         for ref_row in submitted_rows:
             ref_expr = ref_row["canonical_expression"]
-            ref_family = ref_row["family"]
             ref_sharpe = ref_row["sharpe"]
             ref_core = self._extract_core_signal(ref_expr)
+            ref_data_cat = self._classify_data_source(ref_expr)
             ref_cid = ref_row["candidate_id"]
+            ref_family = ref_row["family"]
             ref_tid = ref_row["template_id"]
 
-            # Layer 1: Core signal match — near-certain PnL correlation > 0.7
+            # ── Tier 1: Same core signal → guaranteed high PnL correlation ──
             if cand_core and ref_core and cand_core == ref_core:
-                # Same core signal — only pass if Sharpe is 10% better
                 if sharpe is not None and ref_sharpe is not None and sharpe >= float(ref_sharpe) * 1.10:
-                    continue  # This specific ref is ok, check others
+                    continue
                 return {
                     "fits": False,
                     "max_similarity": 0.95,
@@ -321,58 +335,101 @@ class AlphaBot:
                     "ref_template_id": ref_tid,
                 }
 
-            # Layer 2: Same family — high risk of PnL correlation 0.5-0.8
-            if cand_family == ref_family:
-                # Same family but different core signal — still risky
-                # Require Sharpe 10% better to be safe
+            # ── Tier 2: Same data source category → high PnL correlation risk ──
+            # Alphas using the same primary data source (e.g., both use price
+            # returns) tend to correlate 0.5-0.8 even with different expressions.
+            # Block unless Sharpe is 10%+ better.
+            if cand_data_cat == ref_data_cat:
                 if sharpe is not None and ref_sharpe is not None and sharpe >= float(ref_sharpe) * 1.10:
                     continue
                 return {
                     "fits": False,
                     "max_similarity": 0.70,
-                    "reason": f"same_family '{cand_family}' — needs Sharpe >= {float(ref_sharpe) * 1.10:.2f} vs submitted {ref_cid}",
+                    "reason": (
+                        f"same_data_category '{cand_data_cat}' as submitted {ref_cid} "
+                        f"(family={ref_family}) — needs Sharpe >= {float(ref_sharpe) * 1.10:.2f}"
+                    ),
                     "ref_candidate_id": ref_cid,
                     "ref_family": ref_family,
                     "ref_template_id": ref_tid,
                 }
 
-        # Layer 3: Cross-family structural similarity check
-        cand_sig = self.similarity_engine.signature_from_row(candidate_row)
-        best_score = 0.0
-        best_ref_row = None
-
-        for ref_row in submitted_rows:
-            ref_sig = self.similarity_engine.signature_from_row(ref_row)
-            score = self.similarity_engine.pair_similarity(cand_sig, ref_sig)
-            if score > best_score:
-                best_score = score
-                best_ref_row = ref_row
-
-        threshold = getattr(config, "SUBMISSION_MAX_SIMILARITY", 0.45)
-
-        if best_score >= threshold and best_ref_row is not None:
-            ref_sharpe = best_ref_row["sharpe"]
-            if sharpe is not None and ref_sharpe is not None and sharpe >= float(ref_sharpe) * 1.10:
-                return {
-                    "fits": True,
-                    "max_similarity": best_score,
-                    "reason": f"cross_family_sharpe_override",
-                    "sharpe_margin": f"{sharpe:.3f} vs {float(ref_sharpe):.3f}",
-                }
-            return {
-                "fits": False,
-                "max_similarity": best_score,
-                "reason": f"cross_family_too_similar (sim={best_score:.3f})",
-                "ref_candidate_id": best_ref_row["candidate_id"],
-                "ref_family": best_ref_row["family"],
-                "ref_template_id": best_ref_row["template_id"],
-            }
-
+        # ── Tier 3: Different data source from all submitted → very likely uncorrelated ──
         return {
             "fits": True,
-            "max_similarity": best_score,
-            "reason": "diverse_enough",
+            "max_similarity": 0.10,
+            "reason": f"different_data_category (candidate='{cand_data_cat}')",
         }
+
+    @staticmethod
+    def _classify_data_source(expression: str) -> str:
+        """
+        Classify an expression by its PRIMARY data source.
+
+        WQ docs: "The most effective way to reduce correlation is to use unique datasets."
+        Alphas using the same primary data source will tend to have correlated PnL,
+        even if the expressions look structurally different.
+
+        Categories:
+          - "price_returns": uses close, returns, open, high, low, vwap
+          - "options_vol": uses implied_volatility_*, historical_volatility_*
+          - "fundamental": uses cashflow_op, ebitda, ebit, eps, debt, etc.
+          - "sentiment": uses scl12_*, snt_*, snt1_*
+          - "volume_only": uses only volume/adv20 without price interaction
+          - "factor_model": uses fscore_*, consensus_analyst_rating, etc.
+          - "mixed": uses fields from multiple categories
+        """
+        expr_lower = expression.lower()
+
+        has_options = any(f in expr_lower for f in [
+            "implied_volatility", "historical_volatility",
+            "call_breakeven", "forward_price", "put_breakeven",
+        ])
+        has_sentiment = any(f in expr_lower for f in [
+            "scl12_", "snt_", "snt1_",
+        ])
+        has_fundamental = any(f in expr_lower for f in [
+            "cashflow_op", "ebitda", "ebit", "eps", "debt", "equity",
+            "enterprise_value", "bookvalue_ps", "capex", "cogs",
+            "current_ratio", "cash_st", "assets", "income", "sales",
+        ])
+        has_factor_model = any(f in expr_lower for f in [
+            "fscore_", "consensus_analyst_rating", "earnings_revision",
+            "asset_growth_rate", "cash_burn_rate",
+        ])
+        has_price = any(f in expr_lower for f in [
+            "returns", "close", "open", "high", "low", "vwap",
+        ])
+        has_volume = any(f in expr_lower for f in [
+            "volume", "adv20",
+        ])
+
+        # Count how many non-price categories are active
+        non_price_categories = sum([has_options, has_sentiment, has_fundamental, has_factor_model])
+
+        # If a non-price data source is the primary signal, classify by that
+        if has_options and not has_price:
+            return "options_vol"
+        if has_options and has_price:
+            return "options_vol"  # Options data is dominant signal even if price is mixed in
+        if has_sentiment:
+            return "sentiment"
+        if has_fundamental and not has_price:
+            return "fundamental"
+        if has_factor_model:
+            return "factor_model"
+        if has_fundamental and has_price:
+            return "fundamental"  # Fundamental ratios with price are fundamentals-driven
+
+        # Price-based signals
+        if has_price and has_volume:
+            return "price_volume"  # Price-volume interaction (e.g., ts_corr(close, volume))
+        if has_price:
+            return "price_returns"
+        if has_volume:
+            return "volume_only"
+
+        return "unknown"
 
     def _extract_core_signal(self, expression: str) -> str:
         """
@@ -739,6 +796,12 @@ class AlphaBot:
                 if self._should_abandon_refinement_base(base_candidate_id):
                     self.storage.mark_refinement_consumed(base_candidate_id)
                     self.refinement_attempts_by_base.pop(base_candidate_id, None)
+
+                    # Track core signal exhaustion to prevent infinite re-queuing
+                    core = self._extract_core_signal(refinement_row.get("canonical_expression", ""))
+                    if core:
+                        self.core_signal_exhausted[core] = self.core_signal_exhausted.get(core, 0) + 1
+
                     print(
                         f"[REFINEMENT_EXHAUSTED] base_candidate_id={base_candidate_id} "
                         f"template={refinement_row['template_id']} family={refinement_row['family']}"

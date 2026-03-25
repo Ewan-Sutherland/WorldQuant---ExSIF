@@ -7,11 +7,11 @@ from bot import AlphaBot
 from brain_client import BrainClient
 from generator import AlphaGenerator
 from scheduler import Scheduler
-from storage import Storage
+from storage_factory import get_storage
 
 
 def main() -> None:
-    storage = Storage(config.DB_PATH)
+    storage = get_storage()
     generator = AlphaGenerator()
     scheduler = Scheduler(max_slots=config.MAX_CONCURRENT_SIMS)
 
