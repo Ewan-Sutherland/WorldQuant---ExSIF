@@ -5,6 +5,7 @@ from datetime import timedelta
 import config
 from evaluator import evaluate_submission, parse_metrics
 from generator import AlphaGenerator
+from llm_generator import LLMAlphaGenerator
 from models import Run, new_id, utc_now
 from scheduler import Scheduler
 from storage import Storage
@@ -38,7 +39,16 @@ class AlphaBot:
         self.refinement_attempts_by_base: dict[str, int] = {}
         self.refinement_local_history: dict[str, list[str]] = {}
         self.core_signal_exhausted: dict[str, int] = {}  # core_signal → exhaustion count
+        self.family_template_exhausted: dict[str, int] = {}  # "family:template_id" → exhaustion count
+        self.concentrated_weight_exprs: set[str] = set()  # v5.5: canonical expressions that fail CONCENTRATED_WEIGHT
         self.similarity_engine = SimilarityEngine()
+
+        # v5.6: LLM-guided generation
+        self.llm_generator = LLMAlphaGenerator()
+        if self.llm_generator.available:
+            print("[LLM] LLM generator available — will mix LLM candidates with templates")
+        else:
+            print("[LLM] No API keys found (GEMINI_API_KEY / GROQ_API_KEY) — template-only mode")
 
     # =========================================================
     # Main loop
@@ -128,6 +138,30 @@ class AlphaBot:
         metrics = parse_metrics(run_id, result)
         self.storage.insert_metrics(metrics)
 
+        # v5.5: Track expressions that fail CONCENTRATED_WEIGHT
+        # This is an expression-level failure (data coverage), not settings-level.
+        # Blacklisting prevents the 34x identical sim waste from v5.4.
+        if metrics.fail_reason and "CONCENTRATED_WEIGHT" in metrics.fail_reason.upper():
+            candidate_row = self.storage.get_candidate_by_id(candidate_id)
+            if candidate_row:
+                cw_expr = candidate_row["canonical_expression"]
+                if cw_expr not in self.concentrated_weight_exprs:
+                    self.concentrated_weight_exprs.add(cw_expr)
+                    print(
+                        f"[CW_BLACKLIST] expr={cw_expr} "
+                        f"total_blacklisted={len(self.concentrated_weight_exprs)}"
+                    )
+
+        # v5.6.1: Record LLM expression failures for feedback
+        if self.llm_generator.available and metrics.sharpe is not None and metrics.sharpe < 0.5:
+            candidate_row = self.storage.get_candidate_by_id(candidate_id)
+            if candidate_row and str(candidate_row.get("template_id", "")).startswith("llm_"):
+                error_desc = metrics.fail_reason or f"low_sharpe_{metrics.sharpe:.2f}"
+                self.llm_generator.record_failure(
+                    expression=candidate_row.get("canonical_expression", ""),
+                    error=error_desc,
+                )
+
         decision = evaluate_submission(candidate_id, metrics)
         self._maybe_queue_refinement(candidate_id, run_id, metrics)
 
@@ -143,32 +177,37 @@ class AlphaBot:
             f"eligible={decision.should_submit} reason={decision.reason}"
         )
 
-        # When eligible, check portfolio fit before submission
+        # When eligible, submit immediately — let WQ's server-side self-correlation
+        # check be the judge. v5.4 blocked 6 eligible alphas that may have passed.
+        # The data-category proxy was wrong — cost us real submissions.
         if decision.should_submit:
-            portfolio_check = self._check_submission_portfolio_fit(
+            # Log data category for analytics (but NEVER block)
+            portfolio_info = self._check_submission_portfolio_fit(
                 candidate_id=candidate_id,
                 run_id=run_id,
                 sharpe=metrics.sharpe,
             )
 
-            if portfolio_check["fits"]:
+            cat_info = portfolio_info.get("reason", "unknown")
+            max_sim = portfolio_info.get("max_similarity", 0.0)
+
+            if portfolio_info["fits"]:
                 print(
                     f"[ELIGIBLE_DIVERSE] run_id={run_id} candidate_id={candidate_id} "
-                    f"max_sim={portfolio_check['max_similarity']:.3f} "
-                    f"sharpe_margin={portfolio_check.get('sharpe_margin', 'n/a')} "
-                    f"READY TO SUBMIT"
+                    f"max_sim={max_sim:.3f} "
+                    f"category_info={cat_info}"
                 )
-                if config.AUTO_SUBMIT:
-                    self._attempt_submission(candidate_id, run_id, result)
             else:
+                # v5.5: Log the warning but submit anyway
                 print(
-                    f"[ELIGIBLE_CORRELATED] run_id={run_id} candidate_id={candidate_id} "
-                    f"max_sim={portfolio_check['max_similarity']:.3f} "
-                    f"vs_submitted={portfolio_check.get('ref_candidate_id', '?')} "
-                    f"ref_family={portfolio_check.get('ref_family', '?')} "
-                    f"reason={portfolio_check['reason']} "
-                    f"SKIPPING — would likely fail self-correlation"
+                    f"[ELIGIBLE_MAYBE_CORRELATED] run_id={run_id} candidate_id={candidate_id} "
+                    f"max_sim={max_sim:.3f} "
+                    f"category_info={cat_info} "
+                    f"SUBMITTING ANYWAY — let WQ decide"
                 )
+
+            if config.AUTO_SUBMIT:
+                self._attempt_submission(candidate_id, run_id, result)
 
         if self.completed_runs % config.REPORT_EVERY_N_COMPLETIONS == 0:
             self._print_progress_report()
@@ -193,11 +232,17 @@ class AlphaBot:
         # Prevents the opt_01 problem: 33 different candidates for the same core signal
         # each getting 7 refinement attempts = 231 wasted sims
         max_core_exhaustions = getattr(config, "MAX_CORE_SIGNAL_EXHAUSTIONS", 3)
+        max_ft_exhaustions = getattr(config, "MAX_FAMILY_TEMPLATE_EXHAUSTIONS", 5)
         candidate_row = self.storage.get_candidate_by_id(candidate_id)
         if candidate_row:
             core = self._extract_core_signal(candidate_row.get("canonical_expression", ""))
             if core and self.core_signal_exhausted.get(core, 0) >= max_core_exhaustions:
                 return  # Silently skip — this core signal has been tried enough
+
+            # Check family+template exhaustion (catches cs_02 problem)
+            ft_key = f"{candidate_row.get('family', '')}:{candidate_row.get('template_id', '')}"
+            if self.family_template_exhausted.get(ft_key, 0) >= max_ft_exhaustions:
+                return  # This family+template combo has been exhausted too many times
 
         source_stage = None
         priority = None
@@ -259,15 +304,55 @@ class AlphaBot:
 
         try:
             submission_response = self.client.submit_alpha(alpha_id, sim_id=sim_id)
-            self.storage.insert_submission(
-                submission_id=new_id("sub"),
-                candidate_id=candidate_id,
-                run_id=run_id,
-                submitted_at=utc_now(),
-                submission_status="submitted",
-                message=str(submission_response)[:500],
-            )
-            print(f"[SUBMITTED] run_id={run_id} alpha_id={alpha_id} response={str(submission_response)[:200]}")
+
+            # v5.5: Use the _verified flag from brain_client's verify step
+            verified = submission_response.get("_verified")
+            wq_status = submission_response.get("_wq_status", "?")
+            wq_stage = submission_response.get("_wq_stage", "?")
+
+            if verified is True:
+                # WQ confirmed it's submitted/active — record as confirmed
+                self.storage.insert_submission(
+                    submission_id=new_id("sub"),
+                    candidate_id=candidate_id,
+                    run_id=run_id,
+                    submitted_at=utc_now(),
+                    submission_status="confirmed",
+                    message=f"verified: status={wq_status} stage={wq_stage} raw={str(submission_response)[:300]}",
+                )
+                print(
+                    f"[SUBMIT_CONFIRMED] run_id={run_id} alpha_id={alpha_id} "
+                    f"wq_status={wq_status} wq_stage={wq_stage} ✅ VERIFIED ON WQ"
+                )
+            elif verified is False:
+                # API returned 2xx but WQ says UNSUBMITTED — do NOT record as submitted
+                self.storage.insert_submission(
+                    submission_id=new_id("sub"),
+                    candidate_id=candidate_id,
+                    run_id=run_id,
+                    submitted_at=utc_now(),
+                    submission_status="unverified",
+                    message=f"API OK but WQ status={wq_status} stage={wq_stage} — NOT actually submitted",
+                )
+                print(
+                    f"[SUBMIT_UNVERIFIED] run_id={run_id} alpha_id={alpha_id} "
+                    f"wq_status={wq_status} wq_stage={wq_stage} "
+                    f"⚠️ API returned OK but WQ did NOT accept — check manually"
+                )
+            else:
+                # Couldn't verify (network error on verify call) — record as pending
+                self.storage.insert_submission(
+                    submission_id=new_id("sub"),
+                    candidate_id=candidate_id,
+                    run_id=run_id,
+                    submitted_at=utc_now(),
+                    submission_status="pending_verification",
+                    message=f"verify_failed raw={str(submission_response)[:400]}",
+                )
+                print(
+                    f"[SUBMIT_PENDING] run_id={run_id} alpha_id={alpha_id} "
+                    f"⚠️ Could not verify — check WQ website manually"
+                )
         except Exception as exc:
             self.storage.insert_submission(
                 submission_id=new_id("sub"),
@@ -567,18 +652,29 @@ class AlphaBot:
     def _family_bias_map(self) -> dict[str, float]:
         stats = self._family_stats_map()
         bias: dict[str, float] = {}
+        min_explore = getattr(config, "MIN_EXPLORATION_PER_FAMILY", 25)
 
         for family in config.DEFAULT_FAMILY_ORDER if hasattr(config, "DEFAULT_FAMILY_ORDER") else []:
             if family not in stats:
+                # v5.7: Unseen family — force high exploration weight
+                bias[family] = 3.0
+            else:
                 bias[family] = 1.0
 
         for family, row in stats.items():
-            bias[family] = self._score_from_stats(
-                avg_sharpe=row["avg_sharpe"],
-                avg_fitness=row["avg_fitness"],
-                avg_turnover=row["avg_turnover"],
-                n_runs=row["n_runs"],
-            )
+            n_runs = row.get("n_runs", 0)
+
+            if n_runs < min_explore:
+                # v5.7: Under minimum exploration — force high weight
+                # This prevents adaptive weighting from starving new signal classes
+                bias[family] = 3.0
+            else:
+                bias[family] = self._score_from_stats(
+                    avg_sharpe=row["avg_sharpe"],
+                    avg_fitness=row["avg_fitness"],
+                    avg_turnover=row["avg_turnover"],
+                    n_runs=row["n_runs"],
+                )
 
         # Submission diversity: boost families NOT yet represented in submissions
         submitted_families = self._get_submitted_family_set()
@@ -601,6 +697,73 @@ class AlphaBot:
                 avg_turnover=row["avg_turnover"],
                 n_runs=row["n_runs"],
             )
+
+        return bias
+
+    def _settings_bias_map(self) -> dict[str, dict[str, float]]:
+        """
+        v5.5: Compute adaptive weights for each settings dimension.
+
+        Returns: {"universe": {"TOP1000": 1.4, "TOP3000": 0.8, ...},
+                  "neutralization": {...}, "decay": {...}, "truncation": {...}}
+
+        Guardrails against over-specialization:
+        - MIN_OBS = 8: under 8 observations, weight = 1.0 (no opinion yet)
+        - Score formula biased toward 1.0 center — even the best setting
+          only gets ~2x weight, worst gets ~0.4x
+        - submit_rate bonus: settings that produce eligible alphas get a boost
+        """
+        MIN_OBS = 8
+
+        try:
+            raw_stats = self.storage.get_recent_settings_stats(
+                limit=config.TEMPLATE_SCORE_LOOKBACK_RUNS
+            )
+        except Exception as exc:
+            print(f"[SETTINGS_BIAS_ERROR] {exc}")
+            return {}
+
+        bias: dict[str, dict[str, float]] = {}
+
+        for dimension, rows in raw_stats.items():
+            dim_bias: dict[str, float] = {}
+
+            for row in rows:
+                setting_value = str(row["setting_value"]) if row["setting_value"] is not None else None
+                if setting_value is None:
+                    continue
+
+                n_runs = int(row["n_runs"] or 0)
+                avg_sharpe = row["avg_sharpe"]
+                avg_fitness = row["avg_fitness"]
+                submit_rate = row.get("submit_rate")
+
+                # Not enough data — stay neutral
+                if n_runs < MIN_OBS or avg_sharpe is None or avg_fitness is None:
+                    dim_bias[setting_value] = 1.0
+                    continue
+
+                # Score: centered at 1.0, range roughly [0.3, 2.5]
+                # Lower coefficients than family scoring — settings have less
+                # signal-to-noise than expression structure
+                score = 1.0
+                score += 0.35 * max(-1.0, min(1.5, float(avg_sharpe)))
+                score += 0.20 * max(-1.0, min(1.5, float(avg_fitness)))
+
+                # Bonus for settings that actually produce eligible alphas
+                if submit_rate is not None and float(submit_rate) > 0:
+                    score += 0.40 * min(1.0, float(submit_rate) * 10.0)
+
+                # Confidence scaling: partial weight for small samples
+                if n_runs < 20:
+                    # Blend toward 1.0 for low sample counts
+                    confidence = n_runs / 20.0
+                    score = 1.0 + (score - 1.0) * confidence
+
+                dim_bias[setting_value] = max(0.25, min(2.50, score))
+
+            if dim_bias:
+                bias[dimension] = dim_bias
 
         return bias
 
@@ -745,11 +908,24 @@ class AlphaBot:
     def _fresh_candidate(self):
         family_bias = self._family_bias_map()
         template_bias = self._template_bias_map()
+        settings_bias = self._settings_bias_map()
 
+        # v5.6: Try LLM generation some of the time
+        llm_prob = getattr(config, "LLM_GENERATION_PROBABILITY", 0.35)
+        if (
+            self.llm_generator.available
+            and self.generator.rng.random() < llm_prob
+        ):
+            candidate = self._llm_candidate(settings_bias)
+            if candidate is not None:
+                return candidate
+
+        # Template generation (original path)
         for _ in range(8):
             candidate = self.generator.generate_candidate(
                 family_bias=family_bias,
                 template_bias=template_bias,
+                settings_bias=settings_bias,
             )
 
             if self.storage.candidate_exists(candidate.expression_hash):
@@ -772,6 +948,76 @@ class AlphaBot:
             return candidate
 
         return None
+
+    def _llm_candidate(self, settings_bias=None):
+        """
+        v5.6: Generate a candidate using LLM-guided expression generation.
+        Returns a Candidate or None if LLM fails or expression is a duplicate.
+        """
+        # Gather context for the LLM prompt
+        submitted_rows = self.storage.get_submitted_candidate_rows(limit=50)
+        submitted_exprs = [r["canonical_expression"] for r in submitted_rows]
+
+        # Get near-passers for the LLM to learn from
+        near_passers = []
+        try:
+            ref_rows = self.storage.get_similarity_reference_candidates(
+                limit=20, min_sharpe=1.15, min_fitness=0.60,
+            )
+            for r in ref_rows:
+                near_passers.append({
+                    "expression": r.get("canonical_expression", ""),
+                    "sharpe": float(r.get("sharpe", 0) or 0),
+                    "fitness": float(r.get("fitness", 0) or 0),
+                    "reason": r.get("fail_reason", "") or "",
+                })
+        except Exception:
+            pass
+
+        # Determine which data categories are underexplored
+        submitted_categories = set()
+        for expr in submitted_exprs:
+            submitted_categories.add(self._classify_data_source(expr))
+
+        all_categories = {
+            "options_vol", "sentiment", "fundamental", "factor_model",
+            "price_returns", "price_volume", "volume_only",
+        }
+        underexplored = sorted(all_categories - submitted_categories)
+
+        # Get expression from LLM
+        expr = self.llm_generator.get_expression(
+            submitted_exprs=submitted_exprs,
+            best_near_passers=near_passers,
+            underexplored_categories=underexplored,
+            recent_eligible_count=len(submitted_rows),
+        )
+
+        if expr is None:
+            return None
+
+        # Create candidate from the raw expression
+        try:
+            candidate = self.generator.create_from_expression(expr, settings_bias=settings_bias)
+        except Exception as exc:
+            print(f"[LLM_CANDIDATE_ERROR] expr={expr[:80]} error={exc}")
+            return None
+
+        # Check for duplicates
+        if self.storage.candidate_exists(candidate.expression_hash):
+            print(f"[LLM_DUP] expr={expr[:80]} — already exists")
+            return None
+
+        # Check concentrated weight blacklist
+        if candidate.canonical_expression in self.concentrated_weight_exprs:
+            print(f"[LLM_CW_BLOCKED] expr={expr[:80]}")
+            return None
+
+        print(
+            f"[LLM_CANDIDATE] family={candidate.family} template={candidate.template_id} "
+            f"expr={candidate.expression}"
+        )
+        return candidate
 
     def _get_candidate_with_refinement_priority(self):
         last_base_tried = None
@@ -802,9 +1048,15 @@ class AlphaBot:
                     if core:
                         self.core_signal_exhausted[core] = self.core_signal_exhausted.get(core, 0) + 1
 
+                    # Track family+template exhaustion to cap entire template families
+                    ft_key = f"{refinement_row['family']}:{refinement_row['template_id']}"
+                    self.family_template_exhausted[ft_key] = self.family_template_exhausted.get(ft_key, 0) + 1
+                    ft_count = self.family_template_exhausted[ft_key]
+
                     print(
                         f"[REFINEMENT_EXHAUSTED] base_candidate_id={base_candidate_id} "
-                        f"template={refinement_row['template_id']} family={refinement_row['family']}"
+                        f"template={refinement_row['template_id']} family={refinement_row['family']} "
+                        f"ft_exhaustions={ft_count}"
                     )
                     continue
 
@@ -873,6 +1125,16 @@ class AlphaBot:
             if self.storage.candidate_exists(candidate.expression_hash):
                 continue
 
+            # v5.5: Block expressions known to fail CONCENTRATED_WEIGHT
+            # CONCENTRATED_WEIGHT is expression-level (data coverage), not settings-level.
+            # Changing decay/truncation/universe won't fix it — only expression changes will.
+            if candidate.canonical_expression in self.concentrated_weight_exprs:
+                print(
+                    f"[CW_BLOCKED] template={candidate.template_id} family={candidate.family} "
+                    f"expr={candidate.expression} — already failed CONCENTRATED_WEIGHT"
+                )
+                continue
+
             try:
                 self.storage.insert_candidate(candidate)
             except Exception as exc:
@@ -904,6 +1166,17 @@ class AlphaBot:
                 )
 
             except BrainAPIError as exc:
+                # v5.5: Stop hammering API on rate limit / concurrent limit
+                if "429" in str(exc) or "CONCURRENT" in str(exc).upper():
+                    self.storage.update_run(
+                        run.run_id,
+                        status="failed",
+                        completed_at=utc_now(),
+                        error_message=str(exc),
+                    )
+                    print(f"[SIM_RATE_LIMITED] run_id={run.run_id} — stopping fill loop")
+                    break
+
                 self.storage.update_run(
                     run.run_id,
                     status="failed",
@@ -911,6 +1184,14 @@ class AlphaBot:
                     error_message=str(exc),
                 )
                 print(f"[SIM_SUBMIT_ERROR] run_id={run.run_id} error={exc}")
+
+                # v5.6.1: Record LLM failures for feedback
+                if (self.llm_generator.available
+                        and str(candidate.template_id).startswith("llm_")):
+                    self.llm_generator.record_failure(
+                        expression=candidate.expression,
+                        error=f"WQ_API_ERROR: {str(exc)[:100]}",
+                    )
 
             except Exception as exc:
                 self.storage.update_run(
@@ -1048,5 +1329,29 @@ class AlphaBot:
         missing = all_productive - submitted_families
         if missing:
             print(f"  diversity_gaps={sorted(missing)} — boost these for portfolio diversity")
+
+        # v5.5: Settings performance report
+        settings_bias = self._settings_bias_map()
+        if settings_bias:
+            print(f"\n[REPORT] settings adaptive weights")
+            for dim in ["universe", "neutralization", "decay", "truncation"]:
+                dim_bias = settings_bias.get(dim, {})
+                if dim_bias:
+                    sorted_items = sorted(dim_bias.items(), key=lambda x: x[1], reverse=True)
+                    parts = [f"{k}={v:.2f}" for k, v in sorted_items]
+                    print(f"  {dim}: {', '.join(parts)}")
+
+        # v5.6.1: LLM generation stats
+        if self.llm_generator.available:
+            llm_stats = self.llm_generator.stats()
+            print(
+                f"\n[REPORT] LLM generation"
+                f"\n  api_calls={llm_stats['total_api_calls']} "
+                f"generated={llm_stats['total_generated']} "
+                f"valid={llm_stats['total_valid']} "
+                f"failed_calls={llm_stats['total_failed_calls']} "
+                f"cached={llm_stats['cache_size']} "
+                f"tracked_failures={llm_stats['tracked_failures']}"
+            )
 
         print()

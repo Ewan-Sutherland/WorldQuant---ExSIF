@@ -172,6 +172,7 @@ class Storage:
         status: str | None = None,
         sim_id: str | None = None,
         alpha_id: str | None = None,
+        submitted_at: datetime | None = None,
         completed_at: datetime | None = None,
         error_message: str | None = None,
         raw_result: dict | None = None,
@@ -183,6 +184,8 @@ class Storage:
             data["sim_id"] = sim_id
         if alpha_id is not None:
             data["alpha_id"] = alpha_id
+        if submitted_at is not None:
+            data["submitted_at"] = dt_to_str(submitted_at)
         if completed_at is not None:
             data["completed_at"] = dt_to_str(completed_at)
         if error_message is not None:
@@ -305,6 +308,19 @@ class Storage:
 
     def get_recent_template_stats(self, limit: int = 180) -> list[dict]:
         return self._rpc("get_template_stats", {"run_limit": limit})
+
+    def get_recent_settings_stats(self, limit: int = 500) -> dict[str, list[dict]]:
+        """v5.5: Return performance stats grouped by each settings dimension."""
+        rows = self._rpc("get_settings_stats", {"run_limit": limit})
+        # RPC returns flat rows with 'dimension' column — group by dimension
+        results: dict[str, list[dict]] = {
+            "universe": [], "neutralization": [], "decay": [], "truncation": [],
+        }
+        for row in rows:
+            dim = row.get("dimension", "")
+            if dim in results:
+                results[dim].append(row)
+        return results
 
     def get_submitted_candidate_rows(self, *, limit: int = 300) -> list[dict]:
         return self._rpc("get_submitted_candidates", {"row_limit": limit})

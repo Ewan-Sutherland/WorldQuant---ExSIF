@@ -550,6 +550,47 @@ class Storage:
             ).fetchall()
             return rows
 
+    def get_recent_settings_stats(self, limit: int = 500) -> dict[str, list[sqlite3.Row]]:
+        """
+        v5.5: Return performance stats grouped by each settings dimension.
+        Returns dict with keys: 'universe', 'neutralization', 'decay', 'truncation'
+        Each value is a list of rows with: setting_value, n_runs, avg_sharpe, avg_fitness
+        """
+        results = {}
+        with self.connect() as conn:
+            for dim, json_key in [
+                ("universe", "universe"),
+                ("neutralization", "neutralization"),
+                ("decay", "decay"),
+                ("truncation", "truncation"),
+            ]:
+                rows = conn.execute(
+                    f"""
+                    SELECT
+                        json_extract(c.settings_json, '$.{json_key}') AS setting_value,
+                        COUNT(*) AS n_runs,
+                        AVG(m.sharpe) AS avg_sharpe,
+                        AVG(m.fitness) AS avg_fitness,
+                        AVG(CASE WHEN m.submit_eligible = 1 THEN 1.0 ELSE 0.0 END) AS submit_rate
+                    FROM metrics m
+                    JOIN runs r ON m.run_id = r.run_id
+                    JOIN candidates c ON r.candidate_id = c.candidate_id
+                    WHERE r.run_id IN (
+                        SELECT run_id
+                        FROM runs
+                        WHERE status = 'completed'
+                        ORDER BY completed_at DESC
+                        LIMIT ?
+                    )
+                    AND json_extract(c.settings_json, '$.{json_key}') IS NOT NULL
+                    GROUP BY setting_value
+                    ORDER BY avg_sharpe DESC
+                    """,
+                    (limit,),
+                ).fetchall()
+                results[dim] = rows
+        return results
+
     def get_similarity_reference_candidates(
         self,
         *,
@@ -653,7 +694,7 @@ class Storage:
                     ON s.candidate_id = c.candidate_id
                 LEFT JOIN metrics m
                     ON r.run_id = m.run_id
-                WHERE s.submission_status = 'submitted'
+                WHERE s.submission_status IN ('submitted', 'confirmed')
                 ORDER BY s.submitted_at DESC
                 LIMIT ?
                 """,

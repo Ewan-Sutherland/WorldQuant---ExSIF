@@ -9,9 +9,11 @@ from canonicalize import canonicalize_expression, hash_candidate
 from models import Candidate, SimulationSettings
 from templates import (
     FUNDAMENTAL_FIELDS, DEEP_FUNDAMENTAL_FIELDS, ANALYST_FIELDS,
-    SENTIMENT_FIELDS, OPTIONS_WINDOWS,
+    SENTIMENT_FIELDS, OPTIONS_WINDOWS, FSCORE_FIELDS,
     SAFE_PARAM_RANGES, TEMPLATE_LIBRARY,
+    DERIVATIVE_FIELDS, PCR_WINDOWS,
 )
+import templates as templates_mod
 
 
 DEFAULT_BASE_FAMILY_WEIGHTS = {
@@ -29,6 +31,10 @@ DEFAULT_BASE_FAMILY_WEIGHTS = {
     "fundamental_value": 2.0,
     "analyst_sentiment": 2.5,
     "options_vol": 1.8,
+    # v5.4 new families
+    "liquidity_scaled": 3.5,  # High — these naturally pass sub-universe tests
+    "fundamental_scores": 3.0,  # fscore data = unique data category
+    "size_value": 2.5,  # Fundamental ratios = different from price signals
 }
 
 
@@ -40,15 +46,15 @@ class AlphaGenerator:
     # PUBLIC
     # ============================
 
-    def generate_candidate(self, family_bias=None, template_bias=None):
+    def generate_candidate(self, family_bias=None, template_bias=None, settings_bias=None):
         family = self._sample_family(family_bias)
         template = self._sample_template(family, template_bias)
 
-        params = self._sample_params(template["expression"])
+        params = self._sample_params(template["expression"], family=family)
         expr, fields = self._render(template["expression"], params)
         expr = self._post_process(expr, family=family, template_id=template["template_id"], light=False)
 
-        settings = self._sample_settings(family)
+        settings = self._sample_settings(family, settings_bias=settings_bias)
         canon = canonicalize_expression(expr)
         h = hash_candidate(canon, settings.to_dict())
 
@@ -62,6 +68,69 @@ class AlphaGenerator:
             params=params,
             settings=settings,
         )
+
+    def create_from_expression(self, raw_expr: str, settings_bias=None) -> Candidate:
+        """
+        v5.6: Create a Candidate from a raw LLM-generated expression.
+        Classifies the expression into a family, generates settings, and wraps it.
+        """
+        expr = raw_expr.strip()
+        family = self._classify_llm_family(expr)
+        template_id = f"llm_{family[:4]}"
+
+        settings = self._sample_settings(family, settings_bias=settings_bias)
+        canon = canonicalize_expression(expr)
+        h = hash_candidate(canon, settings.to_dict())
+        fields = self._extract_fields(expr, {})
+
+        return Candidate.create(
+            expression=expr,
+            canonical_expression=canon,
+            expression_hash=h,
+            template_id=template_id,
+            family=family,
+            fields=fields,
+            params={},
+            settings=settings,
+        )
+
+    def _classify_llm_family(self, expr: str) -> str:
+        """Classify an LLM-generated expression into a family for tracking."""
+        expr_lower = expr.lower()
+
+        if any(f in expr_lower for f in ["implied_volatility", "historical_volatility", "pcr_"]):
+            return "options_vol"
+        if any(f in expr_lower for f in ["news_", "scl12_", "snt_social"]):
+            return "sentiment"
+        if any(f in expr_lower for f in ["est_", "consensus_analyst", "snt1_d1_"]):
+            return "analyst_sentiment"
+        if any(f in expr_lower for f in ["fscore_"]):
+            return "fundamental_scores"
+        if any(f in expr_lower for f in [
+            "cashflow_op", "ebitda", "ebit", "enterprise_value",
+            "bookvalue_ps", "current_ratio", "capex", "cogs",
+        ]):
+            return "fundamental_value"
+        if any(f in expr_lower for f in ["eps", "debt", "equity", "assets", "sales", "income"]):
+            return "size_value"
+        if "trade_when" in expr_lower:
+            return "conditional"
+        if "group_rank" in expr_lower:
+            return "cross_sectional"
+        if "ts_corr" in expr_lower and "volume" in expr_lower:
+            return "price_vol_corr"
+        if "adv20" in expr_lower or ("cap" in expr_lower and "returns" in expr_lower):
+            return "liquidity_scaled"
+        if "volume" in expr_lower and "returns" in expr_lower:
+            return "volume_flow"
+        if "ts_std_dev" in expr_lower or "volatility" in expr_lower:
+            return "volatility"
+        if any(f in expr_lower for f in ["open", "high", "low", "vwap"]):
+            return "intraday"
+        if "returns" in expr_lower or "close" in expr_lower:
+            return "cross_sectional"
+
+        return "llm_novel"
 
     def mutate_candidate(self, row, metrics_hint: dict[str, Any] | None = None):
         family = row["family"]
@@ -81,8 +150,8 @@ class AlphaGenerator:
 
         mode = self._refinement_mode(reason=reason, metrics_hint=metrics_hint)
 
-        # Settings-only refinement: expression is great, only settings need fixing
-        if mode in ("concentrated_weight", "sub_universe_sharpe"):
+        # Settings-only refinement: sub_universe_sharpe is a settings problem
+        if mode == "sub_universe_sharpe":
             original_expr = row["canonical_expression"]
             settings = self._mutate_settings(settings, mode=mode, family=family)
             sim = SimulationSettings(**settings)
@@ -96,6 +165,40 @@ class AlphaGenerator:
                 template_id=template_id,
                 family=family,
                 fields=self._extract_fields(original_expr, params),
+                params=params,
+                settings=sim,
+            )
+
+        # v5.5: CONCENTRATED_WEIGHT = expression-level problem, not settings-level
+        # fscore/options data only covers certain stocks → rank() concentrates weight
+        # Fix: multiply by rank(cap) or rank(adv20) to spread weight to liquid stocks
+        if mode == "concentrated_weight":
+            original_expr = row["canonical_expression"]
+            modified_expr = self._apply_concentration_fix(original_expr)
+            settings = self._mutate_settings(settings, mode=mode, family=family)
+            sim = SimulationSettings(**settings)
+            canon = canonicalize_expression(modified_expr)
+            h = hash_candidate(canon, sim.to_dict())
+
+            # Determine template_id for the modified expression
+            modified_template_id = template_id
+            if family == "fundamental_scores" and "ts_zscore" in modified_expr:
+                if "* rank(adv20)" in modified_expr:
+                    modified_template_id = "fs_05"
+                elif modified_expr.endswith("* rank(cap))"):
+                    # rank(ts_zscore(...) * rank(cap)) — cap INSIDE outer rank
+                    modified_template_id = "fs_06"
+                elif "* rank(cap)" in modified_expr:
+                    # rank(ts_zscore(...)) * rank(cap) — cap OUTSIDE outer rank
+                    modified_template_id = "fs_04"
+
+            return Candidate.create(
+                expression=modified_expr,
+                canonical_expression=canon,
+                expression_hash=h,
+                template_id=modified_template_id,
+                family=family,
+                fields=self._extract_fields(modified_expr, params),
                 params=params,
                 settings=sim,
             )
@@ -388,12 +491,28 @@ class AlphaGenerator:
         allowed = SAFE_PARAM_RANGES.get(key, desired)
         return [x for x in desired if x in allowed] or list(allowed)
 
-    def _sample_params(self, template):
+    def _sample_params(self, template, family=None):
         p = {}
+        # v5.7: Use fundamental param ranges for families with quarterly data
+        fundamental_families = {"fundamental_value", "quality_trend", "size_value"}
+        use_fund_params = family in fundamental_families
+
         if "{n}" in template:
-            p["n"] = self.rng.choice(self._grid("n"))
+            if use_fund_params:
+                p["n"] = self.rng.choice(getattr(templates_mod, "FUNDAMENTAL_PARAM_RANGES", {}).get("n", self._grid("n")))
+            else:
+                p["n"] = self.rng.choice(self._grid("n"))
         if "{m}" in template:
-            p["m"] = self.rng.choice(self._grid("m"))
+            if use_fund_params:
+                p["m"] = self.rng.choice(getattr(templates_mod, "FUNDAMENTAL_PARAM_RANGES", {}).get("m", self._grid("m")))
+            else:
+                p["m"] = self.rng.choice(self._grid("m"))
+            # Ensure m ≠ n (fixes cs_03: ts_mean(returns, m) - ts_mean(returns, n) = 0 when m==n)
+            if "n" in p and p["m"] == p["n"]:
+                grid = getattr(templates_mod, "FUNDAMENTAL_PARAM_RANGES", {}).get("m", self._grid("m")) if use_fund_params else self._grid("m")
+                alternatives = [v for v in grid if v != p["n"]]
+                if alternatives:
+                    p["m"] = self.rng.choice(alternatives)
         if "{field}" in template:
             p["field"] = self.rng.choice(FUNDAMENTAL_FIELDS)
         if "{deep_field}" in template:
@@ -404,6 +523,13 @@ class AlphaGenerator:
             p["sentiment_field"] = self.rng.choice(SENTIMENT_FIELDS)
         if "{opt_window}" in template:
             p["opt_window"] = self.rng.choice(OPTIONS_WINDOWS)
+        if "{fscore_field}" in template:
+            p["fscore_field"] = self.rng.choice(FSCORE_FIELDS)
+        # v5.7: New field types
+        if "{derivative_field}" in template:
+            p["derivative_field"] = self.rng.choice(DERIVATIVE_FIELDS)
+        if "{pcr_window}" in template:
+            p["pcr_window"] = self.rng.choice(PCR_WINDOWS)
         return p
 
     def _mutate_params_for_mode(self, params, template, mode: str, metrics_hint: dict[str, Any] | None = None):
@@ -476,6 +602,12 @@ class AlphaGenerator:
 
         if "{opt_window}" in template and "opt_window" not in out:
             out["opt_window"] = self.rng.choice(OPTIONS_WINDOWS)
+
+        if "fscore_field" in out and self.rng.random() < 0.15:
+            out["fscore_field"] = self.rng.choice(FSCORE_FIELDS)
+
+        if "{fscore_field}" in template and "fscore_field" not in out:
+            out["fscore_field"] = self.rng.choice(FSCORE_FIELDS)
 
         return out
 
@@ -560,8 +692,10 @@ class AlphaGenerator:
 
         # Universe — CRITICAL for sub_universe_sharpe failures
         if mode == "sub_universe_sharpe":
-            # TOPSP500 is smaller/more liquid — better sub-universe Sharpe
-            out["universe"] = "TOPSP500"
+            # Try intermediate universes — TOPSP500 kills some signals entirely
+            # TOP1000 and TOP500 are better starting points
+            sub_universe_options = ["TOP1000", "TOP500", "TOPSP500"]
+            out["universe"] = self.rng.choice(sub_universe_options)
         else:
             universe_prob = 0.12 if mode == "fitness" else 0.05
             if "universe" in out and self.rng.random() < universe_prob:
@@ -569,14 +703,65 @@ class AlphaGenerator:
 
         return out
 
-    def _sample_settings(self, family):
+    def _sample_settings(self, family, settings_bias=None):
+        """
+        v5.7: Signal-class-aware settings sampling.
+
+        Uses signal class profiles from config when available (85% of the time).
+        Falls back to adaptive sampling for exploration (15%) or unknown families.
+        """
+        EXPLORE_PROB = 0.20
+        FLOOR_WEIGHT = 0.25
+        CEILING_WEIGHT = 2.50
+        MIN_OBS = 8
+
+        def weighted_choice(options, dimension_bias):
+            """Pick from options using bias weights, with exploration."""
+            if self.rng.random() < EXPLORE_PROB or not dimension_bias:
+                return self.rng.choice(options)
+
+            weights = []
+            for opt in options:
+                key = str(opt)
+                w = dimension_bias.get(key, 1.0)
+                w = max(FLOOR_WEIGHT, min(CEILING_WEIGHT, w))
+                weights.append(w)
+
+            return self.rng.choices(options, weights=weights, k=1)[0]
+
+        # v5.7: Use signal-class settings profile if available
+        profile = getattr(config, "SIGNAL_CLASS_SETTINGS", {}).get(family)
+        if profile and self.rng.random() > 0.15:  # 85% use profile, 15% explore
+            return SimulationSettings(
+                region=config.DEFAULT_REGION,
+                universe=self.rng.choice(profile.get("universes", config.DEFAULT_UNIVERSES)),
+                delay=config.DEFAULT_DELAY,
+                decay=self.rng.choice(profile.get("decays", config.DEFAULT_DECAYS)),
+                neutralization=self.rng.choice(profile.get("neutralizations", config.DEFAULT_NEUTRALIZATIONS)),
+                truncation=self.rng.choice(profile.get("truncations", config.DEFAULT_TRUNCATIONS)),
+            )
+
+        bias = settings_bias or {}
+
         return SimulationSettings(
             region=config.DEFAULT_REGION,
-            universe=self.rng.choice(config.DEFAULT_UNIVERSES),
+            universe=weighted_choice(
+                config.DEFAULT_UNIVERSES,
+                bias.get("universe"),
+            ),
             delay=config.DEFAULT_DELAY,
-            decay=self.rng.choice(config.DEFAULT_DECAYS),
-            neutralization=self.rng.choice(config.DEFAULT_NEUTRALIZATIONS),
-            truncation=self.rng.choice(config.DEFAULT_TRUNCATIONS),
+            decay=weighted_choice(
+                config.DEFAULT_DECAYS,
+                bias.get("decay"),
+            ),
+            neutralization=weighted_choice(
+                config.DEFAULT_NEUTRALIZATIONS,
+                bias.get("neutralization"),
+            ),
+            truncation=weighted_choice(
+                config.DEFAULT_TRUNCATIONS,
+                bias.get("truncation"),
+            ),
             pasteurization=config.DEFAULT_PASTEURIZATION,
             unit_handling=config.DEFAULT_UNIT_HANDLING,
             nan_handling=config.DEFAULT_NAN_HANDLING,
@@ -763,7 +948,7 @@ class AlphaGenerator:
         fields = list(existing_fields or [])
 
         # Extract named params
-        for key in ["field", "deep_field", "analyst_field", "sentiment_field"]:
+        for key in ["field", "deep_field", "analyst_field", "sentiment_field", "fscore_field"]:
             if key in params and params[key] not in fields:
                 fields.append(params[key])
 
@@ -777,6 +962,8 @@ class AlphaGenerator:
             "consensus_analyst_rating",
             "scl12_buzz", "scl12_sentiment", "snt_social_value",
             "implied_volatility_call", "implied_volatility_put", "historical_volatility",
+            "fscore_bfl_value", "fscore_bfl_momentum", "fscore_bfl_quality",
+            "fscore_bfl_growth", "fscore_bfl_profitability", "fscore_bfl_total",
         ]
         for f in known_fields:
             if f in expr and f not in fields:
@@ -796,6 +983,66 @@ class AlphaGenerator:
         if isinstance(value, str):
             return json.loads(value)
         return dict(value)
+
+    def _apply_concentration_fix(self, expr: str) -> str:
+        """
+        v5.5: Fix CONCENTRATED_WEIGHT by modifying the expression to spread weight.
+
+        CONCENTRATED_WEIGHT means the expression only produces non-zero values for
+        a small subset of stocks (e.g., fscore data covers ~1500 stocks out of 3000).
+        rank() then concentrates all weight into those stocks.
+
+        Fix strategies (randomly chosen):
+        1. Multiply by rank(cap) — weights by market cap, spreads to large-caps
+        2. Multiply by rank(adv20) — weights by average daily volume, spreads to liquid stocks
+        3. Wrap inner signal inside rank(... * rank(cap)) — tighter integration
+        """
+        transform = self.rng.choice([
+            "multiply_cap",
+            "multiply_adv20",
+            "inner_cap",
+            "multiply_cap",       # Double weight for cap — most reliable fix
+            "multiply_adv20",     # Double weight for adv20 — also reliable
+        ])
+
+        # Strip outer rank() if present, to avoid rank(rank(...))
+        inner = expr
+        had_outer_rank = False
+        if expr.startswith("rank(") and expr.endswith(")"):
+            # Verify balanced parens
+            depth = 0
+            balanced = True
+            test = expr[5:-1]
+            for ch in test:
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                if depth < 0:
+                    balanced = False
+                    break
+            if balanced and depth == 0:
+                inner = test
+                had_outer_rank = True
+
+        if transform == "multiply_cap":
+            if had_outer_rank:
+                return f"rank({inner}) * rank(cap)"
+            else:
+                return f"({expr}) * rank(cap)"
+        elif transform == "multiply_adv20":
+            if had_outer_rank:
+                return f"rank({inner}) * rank(adv20)"
+            else:
+                return f"({expr}) * rank(adv20)"
+        elif transform == "inner_cap":
+            if had_outer_rank:
+                return f"rank({inner} * rank(cap))"
+            else:
+                return f"rank(({expr}) * rank(cap))"
+        else:
+            # Fallback: multiply by rank(cap)
+            return f"({expr}) * rank(cap)"
 
     def _dedupe_weighted(self, candidates: list[str], weights: list[float]):
         seen = {}

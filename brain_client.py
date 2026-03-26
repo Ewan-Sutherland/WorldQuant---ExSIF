@@ -284,19 +284,45 @@ class BrainClient:
                             f"status={new_status} stage={new_stage}"
                         )
                         if new_status in ("SUBMITTED", "ACTIVE") or new_stage == "OS":
+                            result["_verified"] = True
+                            result["_wq_status"] = new_status
+                            result["_wq_stage"] = new_stage
                             return result
+                        else:
+                            # v5.5: API returned 2xx but WQ didn't actually accept it
+                            # (this is what happened to liq_01 in v5.4)
+                            result["_verified"] = False
+                            result["_wq_status"] = new_status
+                            result["_wq_stage"] = new_stage
+                            print(
+                                f"[SUBMIT_UNVERIFIED] alpha_id={alpha_id} "
+                                f"API returned {response.status_code} but WQ status={new_status} "
+                                f"stage={new_stage} — NOT actually submitted"
+                            )
+                            # Don't return yet — try next approach
+                            continue
                     except Exception as ve:
                         print(f"[SUBMIT_VERIFY_ERROR] {ve}")
-
-                    return result
+                        # Can't verify — return with unknown status
+                        result["_verified"] = None
+                        return result
 
             except Exception as exc:
                 last_error = exc
                 print(f"[SUBMIT_ATTEMPT_FAILED] {attempt['desc']} error={exc}")
                 continue
 
+        # v5.5: If we get here, all approaches either failed or returned 2xx but
+        # verify showed UNSUBMITTED. This is NOT a successful submission.
         if last_response is not None and last_response.status_code in (200, 201, 202):
-            return self._parse_json(last_response)
+            result = self._parse_json(last_response)
+            result["_verified"] = False
+            result["_wq_status"] = "UNVERIFIED"
+            print(
+                f"[SUBMIT_ALL_UNVERIFIED] alpha_id={alpha_id} "
+                f"All approaches returned 2xx but none verified on WQ"
+            )
+            return result
 
         raise BrainAPIError(
             f"All submission approaches failed for alpha_id={alpha_id}. "

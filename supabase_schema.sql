@@ -193,7 +193,7 @@ BEGIN
     JOIN runs r ON s.run_id = r.run_id
     JOIN candidates c ON s.candidate_id = c.candidate_id
     LEFT JOIN metrics m ON r.run_id = m.run_id
-    WHERE s.submission_status = 'submitted'
+    WHERE s.submission_status IN ('submitted', 'confirmed')
     ORDER BY s.submitted_at DESC
     LIMIT row_limit;
 END;
@@ -270,5 +270,76 @@ BEGIN
       AND m.sharpe >= min_s AND m.fitness >= min_f
     ORDER BY r.completed_at DESC
     LIMIT row_limit;
+END;
+$$ LANGUAGE plpgsql;
+
+-- v5.5: Settings performance stats (universe, neutralization, decay, truncation)
+CREATE OR REPLACE FUNCTION get_settings_stats(run_limit INT DEFAULT 500)
+RETURNS TABLE (
+    dimension TEXT,
+    setting_value TEXT,
+    n_runs BIGINT,
+    avg_sharpe REAL,
+    avg_fitness REAL,
+    submit_rate REAL
+) AS $$
+BEGIN
+    RETURN QUERY
+    WITH recent AS (
+        SELECT r.run_id, r.candidate_id
+        FROM runs r
+        WHERE r.status = 'completed'
+        ORDER BY r.completed_at DESC
+        LIMIT run_limit
+    )
+    SELECT 'universe'::TEXT AS dimension,
+           (c.settings_json->>'universe')::TEXT AS setting_value,
+           COUNT(*)::BIGINT AS n_runs,
+           AVG(m.sharpe)::REAL AS avg_sharpe,
+           AVG(m.fitness)::REAL AS avg_fitness,
+           AVG(CASE WHEN m.submit_eligible THEN 1.0 ELSE 0.0 END)::REAL AS submit_rate
+    FROM recent rec
+    JOIN candidates c ON rec.candidate_id = c.candidate_id
+    JOIN metrics m ON rec.run_id = m.run_id
+    GROUP BY c.settings_json->>'universe'
+
+    UNION ALL
+
+    SELECT 'neutralization'::TEXT,
+           (c.settings_json->>'neutralization')::TEXT,
+           COUNT(*)::BIGINT,
+           AVG(m.sharpe)::REAL,
+           AVG(m.fitness)::REAL,
+           AVG(CASE WHEN m.submit_eligible THEN 1.0 ELSE 0.0 END)::REAL
+    FROM recent rec
+    JOIN candidates c ON rec.candidate_id = c.candidate_id
+    JOIN metrics m ON rec.run_id = m.run_id
+    GROUP BY c.settings_json->>'neutralization'
+
+    UNION ALL
+
+    SELECT 'decay'::TEXT,
+           (c.settings_json->>'decay')::TEXT,
+           COUNT(*)::BIGINT,
+           AVG(m.sharpe)::REAL,
+           AVG(m.fitness)::REAL,
+           AVG(CASE WHEN m.submit_eligible THEN 1.0 ELSE 0.0 END)::REAL
+    FROM recent rec
+    JOIN candidates c ON rec.candidate_id = c.candidate_id
+    JOIN metrics m ON rec.run_id = m.run_id
+    GROUP BY c.settings_json->>'decay'
+
+    UNION ALL
+
+    SELECT 'truncation'::TEXT,
+           (c.settings_json->>'truncation')::TEXT,
+           COUNT(*)::BIGINT,
+           AVG(m.sharpe)::REAL,
+           AVG(m.fitness)::REAL,
+           AVG(CASE WHEN m.submit_eligible THEN 1.0 ELSE 0.0 END)::REAL
+    FROM recent rec
+    JOIN candidates c ON rec.candidate_id = c.candidate_id
+    JOIN metrics m ON rec.run_id = m.run_id
+    GROUP BY c.settings_json->>'truncation';
 END;
 $$ LANGUAGE plpgsql;
