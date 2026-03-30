@@ -408,6 +408,133 @@ class Storage:
         )
         return True
 
+    # ── v6.0: Optuna warm-start data retrieval ────────────────────────
+
+    def get_runs_for_expression(self, expression: str) -> list[dict]:
+        """Get all completed runs for a specific expression with settings and metrics."""
+        # Step 1: Find candidates with this exact expression
+        cands = self._get("candidates", {
+            "select": "candidate_id,settings_json",
+            "canonical_expression": f"eq.{expression}",
+            "limit": "50",
+        })
+        if not cands:
+            return []
+
+        results = []
+        for cand in cands:
+            cid = cand["candidate_id"]
+            # Step 2: Find completed runs for this candidate
+            runs = self._get("runs", {
+                "select": "run_id",
+                "candidate_id": f"eq.{cid}",
+                "status": "eq.completed",
+                "limit": "20",
+            })
+            for run in runs:
+                rid = run["run_id"]
+                # Step 3: Get metrics
+                mets = self._get("metrics", {
+                    "select": "sharpe,fitness,turnover",
+                    "run_id": f"eq.{rid}",
+                    "limit": "1",
+                })
+                if mets:
+                    import json as _json
+                    sj = cand.get("settings_json")
+                    settings = _json.loads(sj) if isinstance(sj, str) else (sj or {})
+                    results.append({
+                        "run_id": rid,
+                        "settings_json": settings,
+                        "sharpe": mets[0].get("sharpe"),
+                        "fitness": mets[0].get("fitness"),
+                        "turnover": mets[0].get("turnover"),
+                    })
+        return results
+
+    def get_runs_for_core_signal(self, core_signal: str) -> list[dict]:
+        """Get completed runs whose expression contains the core signal."""
+        # PostgREST LIKE query
+        cands = self._get("candidates", {
+            "select": "candidate_id,settings_json,canonical_expression",
+            "canonical_expression": f"like.*{core_signal[:40]}*",
+            "limit": "30",
+        })
+        if not cands:
+            return []
+
+        results = []
+        for cand in cands:
+            cid = cand["candidate_id"]
+            runs = self._get("runs", {
+                "select": "run_id",
+                "candidate_id": f"eq.{cid}",
+                "status": "eq.completed",
+                "limit": "10",
+            })
+            for run in runs:
+                rid = run["run_id"]
+                mets = self._get("metrics", {
+                    "select": "sharpe,fitness,turnover",
+                    "run_id": f"eq.{rid}",
+                    "limit": "1",
+                })
+                if mets and mets[0].get("fitness"):
+                    import json as _json
+                    sj = cand.get("settings_json")
+                    settings = _json.loads(sj) if isinstance(sj, str) else (sj or {})
+                    results.append({
+                        "run_id": rid,
+                        "settings_json": settings,
+                        "sharpe": mets[0].get("sharpe"),
+                        "fitness": mets[0].get("fitness"),
+                        "turnover": mets[0].get("turnover"),
+                    })
+                    if len(results) >= 30:
+                        return results
+        return results
+
+    def get_runs_for_family(self, family: str) -> list[dict]:
+        """Get top completed runs from same family for cross-pollination."""
+        cands = self._get("candidates", {
+            "select": "candidate_id,settings_json",
+            "family": f"eq.{family}",
+            "limit": "50",
+        })
+        if not cands:
+            return []
+
+        results = []
+        for cand in cands:
+            cid = cand["candidate_id"]
+            runs = self._get("runs", {
+                "select": "run_id",
+                "candidate_id": f"eq.{cid}",
+                "status": "eq.completed",
+                "limit": "5",
+            })
+            for run in runs:
+                rid = run["run_id"]
+                mets = self._get("metrics", {
+                    "select": "sharpe,fitness,turnover",
+                    "run_id": f"eq.{rid}",
+                    "limit": "1",
+                })
+                if mets and (mets[0].get("fitness") or 0) > 0.5:
+                    import json as _json
+                    sj = cand.get("settings_json")
+                    settings = _json.loads(sj) if isinstance(sj, str) else (sj or {})
+                    results.append({
+                        "run_id": rid,
+                        "settings_json": settings,
+                        "sharpe": mets[0].get("sharpe"),
+                        "fitness": mets[0].get("fitness"),
+                        "turnover": mets[0].get("turnover"),
+                    })
+                    if len(results) >= 30:
+                        return results
+        return results
+
 
 class _EmptyResult:
     """Stub for compatibility with raw SQL execute calls."""

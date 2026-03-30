@@ -50,7 +50,7 @@ class BrainClient:
         self.session = requests.Session()
         self.session.headers.update(
             {
-                "Accept": "application/json",
+                "Accept": "application/json;version=2.0",
                 "Content-Type": "application/json",
             }
         )
@@ -197,137 +197,163 @@ class BrainClient:
 
     def submit_alpha(self, alpha_id: str, sim_id: str | None = None) -> dict[str, Any]:
         """
-        Submit an alpha for out-of-sample testing.
-        Tries multiple approaches — the PATCH /simulations/{sim_id} method
-        (from teammate's working implementation) is tried first.
+        v5.9.1: Submit an alpha for out-of-sample testing.
+
+        Verified flow from F12 network capture (2026-03-28):
+        1. POST /alphas/{id}/submit → 201 empty body, Retry-After: 1.0
+        2. Poll GET /alphas/{id}/submit:
+           - 200 empty body = still processing (keep polling)
+           - 200 with JSON = PASSED (all checks OK, alpha enters OS)
+           - 403 with JSON = FAILED (self-correlation or other check failed)
+        3. On failure: alpha reverts to IS/UNSUBMITTED (no daily cap cost)
+
+        Returns dict with:
+          _accepted: True/False/None
+          _checks: list of check results
+          _self_correlation: float or None
+          _correlated_with: alpha_id that caused correlation failure, or None
+          _fail_reason: string describing failure, or None
         """
         self.ensure_session()
 
-        attempts = []
+        submit_url = f"{self.base_url}/alphas/{alpha_id}/submit"
 
-        # Approach 0 (MOST LIKELY TO WORK): PATCH /simulations/{sim_id} with {"stage": "ALPHA"}
-        # This is how teammate's bot successfully submits — promotes sim to alpha stage
-        if sim_id:
-            # Extract bare sim_id from full URL if needed
-            bare_sim_id = sim_id
-            if sim_id.startswith("http"):
-                bare_sim_id = sim_id.rstrip("/").split("/")[-1]
-            attempts.append({
-                "method": "PATCH",
-                "url": f"{self.base_url}/simulations/{bare_sim_id}",
-                "json": {"stage": "ALPHA"},
-                "desc": f"PATCH /simulations/{bare_sim_id} stage=ALPHA",
-            })
+        # ── Step 1: POST to initiate submission ──
+        response = self.session.post(submit_url, timeout=60)
 
-        # Approach 1: POST /alphas/{alpha_id}/submit
-        attempts.append({
-            "method": "POST",
-            "url": f"{self.base_url}/alphas/{alpha_id}/submit",
-            "json": None,
-            "desc": f"POST /alphas/{alpha_id}/submit",
-        })
+        if response.status_code == 401:
+            self.login()
+            response = self.session.post(submit_url, timeout=60)
 
-        # Approach 2: PATCH /alphas/{alpha_id} with submit
-        attempts.append({
-            "method": "PATCH",
-            "url": f"{self.base_url}/alphas/{alpha_id}",
-            "json": {"stage": "OS"},
-            "desc": f"PATCH /alphas/{alpha_id} stage=OS",
-        })
+        if response.status_code not in (200, 201, 202):
+            # Immediate rejection (e.g., alpha not eligible, daily cap hit)
+            error_body = response.text[:500]
+            print(
+                f"[SUBMIT_REJECTED] alpha_id={alpha_id} "
+                f"status={response.status_code} body={error_body}"
+            )
+            return {
+                "_accepted": False,
+                "_checks": [],
+                "_self_correlation": None,
+                "_correlated_with": None,
+                "_fail_reason": f"POST rejected: {response.status_code} {error_body}",
+            }
 
-        last_response = None
-        last_error = None
+        retry_after = float(response.headers.get("Retry-After", 1.0))
+        print(
+            f"[SUBMIT_POSTED] alpha_id={alpha_id} "
+            f"status={response.status_code} retry_after={retry_after}"
+        )
 
-        for attempt in attempts:
-            try:
-                if attempt["json"]:
-                    response = self.session.request(
-                        attempt["method"], attempt["url"],
-                        json=attempt["json"], timeout=self.timeout_seconds,
-                    )
-                else:
-                    response = self.session.request(
-                        attempt["method"], attempt["url"],
-                        timeout=self.timeout_seconds,
-                    )
+        # ── Step 2: Poll for check results ──
+        max_polls = 30
+        poll_interval = max(retry_after, 1.0)
 
-                if response.status_code == 401:
-                    self.login()
-                    if attempt["json"]:
-                        response = self.session.request(
-                            attempt["method"], attempt["url"],
-                            json=attempt["json"], timeout=self.timeout_seconds,
-                        )
-                    else:
-                        response = self.session.request(
-                            attempt["method"], attempt["url"],
-                            timeout=self.timeout_seconds,
-                        )
+        for poll_num in range(1, max_polls + 1):
+            time.sleep(poll_interval)
 
-                last_response = response
-                result = self._parse_json(response)
+            resp = self.session.get(submit_url, timeout=30)
 
-                print(
-                    f"[SUBMIT_ATTEMPT] {attempt['desc']} "
-                    f"status_code={response.status_code} "
-                    f"response={str(result)[:300]}"
-                )
-
-                if response.status_code in (200, 201, 202):
-                    # Verify by checking alpha status
-                    try:
-                        verify = self.get_alpha(alpha_id)
-                        new_status = str(verify.get("status", "?")).upper()
-                        new_stage = str(verify.get("stage", "?")).upper()
-                        print(
-                            f"[SUBMIT_VERIFY] alpha_id={alpha_id} "
-                            f"status={new_status} stage={new_stage}"
-                        )
-                        if new_status in ("SUBMITTED", "ACTIVE") or new_stage == "OS":
-                            result["_verified"] = True
-                            result["_wq_status"] = new_status
-                            result["_wq_stage"] = new_stage
-                            return result
-                        else:
-                            # v5.5: API returned 2xx but WQ didn't actually accept it
-                            # (this is what happened to liq_01 in v5.4)
-                            result["_verified"] = False
-                            result["_wq_status"] = new_status
-                            result["_wq_stage"] = new_stage
-                            print(
-                                f"[SUBMIT_UNVERIFIED] alpha_id={alpha_id} "
-                                f"API returned {response.status_code} but WQ status={new_status} "
-                                f"stage={new_stage} — NOT actually submitted"
-                            )
-                            # Don't return yet — try next approach
-                            continue
-                    except Exception as ve:
-                        print(f"[SUBMIT_VERIFY_ERROR] {ve}")
-                        # Can't verify — return with unknown status
-                        result["_verified"] = None
-                        return result
-
-            except Exception as exc:
-                last_error = exc
-                print(f"[SUBMIT_ATTEMPT_FAILED] {attempt['desc']} error={exc}")
+            # 200 empty = still processing
+            if resp.status_code == 200 and len(resp.text.strip()) == 0:
                 continue
 
-        # v5.5: If we get here, all approaches either failed or returned 2xx but
-        # verify showed UNSUBMITTED. This is NOT a successful submission.
-        if last_response is not None and last_response.status_code in (200, 201, 202):
-            result = self._parse_json(last_response)
-            result["_verified"] = False
-            result["_wq_status"] = "UNVERIFIED"
-            print(
-                f"[SUBMIT_ALL_UNVERIFIED] alpha_id={alpha_id} "
-                f"All approaches returned 2xx but none verified on WQ"
-            )
-            return result
+            # 200 with JSON = PASSED, 403 with JSON = FAILED
+            if resp.status_code in (200, 403) and len(resp.text.strip()) > 0:
+                try:
+                    data = resp.json()
+                except ValueError:
+                    continue
 
-        raise BrainAPIError(
-            f"All submission approaches failed for alpha_id={alpha_id}. "
-            f"Last error: {last_error}"
-        )
+                checks = data.get("is", {}).get("checks", [])
+                if not checks:
+                    continue  # Not the final response yet
+
+                # Parse check results
+                failed_checks = []
+                all_checks = []
+                self_corr_value = None
+                correlated_with = None
+
+                for check in checks:
+                    name = check.get("name", "?")
+                    result = check.get("result", "?")
+                    value = check.get("value")
+                    limit = check.get("limit")
+
+                    all_checks.append(check)
+
+                    if result == "PENDING":
+                        break  # Not finished yet
+
+                    if result == "FAIL":
+                        failed_checks.append(check)
+                        if name == "SELF_CORRELATION" and value is not None:
+                            self_corr_value = float(value)
+
+                    status_icon = "✅" if result == "PASS" else "❌" if result == "FAIL" else "⚠️"
+                    print(
+                        f"[SUBMIT_CHECK] {status_icon} {name}: {result} "
+                        f"(value={value}, limit={limit})"
+                    )
+                else:
+                    # All checks resolved (no PENDING break)
+                    # Extract correlated alpha info if available
+                    self_correlated = data.get("is", {}).get("selfCorrelated", {})
+                    records = self_correlated.get("records", [])
+                    if records and len(records) > 0 and len(records[0]) > 0:
+                        correlated_with = records[0][0]  # First element is alpha_id
+                        if self_corr_value is None and len(records[0]) > 5:
+                            self_corr_value = records[0][5]  # correlation value
+
+                    if failed_checks:
+                        fail_names = [c["name"] for c in failed_checks]
+                        print(
+                            f"[SUBMIT_FAILED] alpha_id={alpha_id} "
+                            f"failed_checks={fail_names} "
+                            f"self_correlation={self_corr_value} "
+                            f"correlated_with={correlated_with}"
+                        )
+                        return {
+                            "_accepted": False,
+                            "_checks": all_checks,
+                            "_self_correlation": self_corr_value,
+                            "_correlated_with": correlated_with,
+                            "_fail_reason": f"checks_failed:{','.join(fail_names)}",
+                        }
+                    else:
+                        print(
+                            f"[SUBMIT_ACCEPTED] alpha_id={alpha_id} "
+                            f"all {len(all_checks)} checks PASSED "
+                            f"self_correlation={self_corr_value}"
+                        )
+                        return {
+                            "_accepted": True,
+                            "_checks": all_checks,
+                            "_self_correlation": self_corr_value,
+                            "_correlated_with": None,
+                            "_fail_reason": None,
+                        }
+
+                    continue  # Had a PENDING — keep polling
+
+            # Unexpected status
+            if resp.status_code not in (200, 403):
+                print(
+                    f"[SUBMIT_POLL_UNEXPECTED] poll={poll_num} "
+                    f"status={resp.status_code} body={resp.text[:200]}"
+                )
+
+        # Timed out polling
+        print(f"[SUBMIT_TIMEOUT] alpha_id={alpha_id} timed out after {max_polls} polls")
+        return {
+            "_accepted": None,
+            "_checks": [],
+            "_self_correlation": None,
+            "_correlated_with": None,
+            "_fail_reason": "polling_timeout",
+        }
 
     def wait_for_completion(
         self,

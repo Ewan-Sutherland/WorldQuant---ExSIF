@@ -12,6 +12,8 @@ from templates import (
     SENTIMENT_FIELDS, OPTIONS_WINDOWS, FSCORE_FIELDS,
     SAFE_PARAM_RANGES, TEMPLATE_LIBRARY,
     DERIVATIVE_FIELDS, PCR_WINDOWS,
+    MODEL77_ALL_FIELDS, MODEL77_TIER1_FIELDS, MODEL77_TIER2_FIELDS,
+    MODEL77_NEGATIVE_DIRECTION, DATASET_NEUTRALIZATION,
 )
 import templates as templates_mod
 
@@ -35,6 +37,16 @@ DEFAULT_BASE_FAMILY_WEIGHTS = {
     "liquidity_scaled": 3.5,  # High — these naturally pass sub-universe tests
     "fundamental_scores": 3.0,  # fscore data = unique data category
     "size_value": 2.5,  # Fundamental ratios = different from price signals
+    # v5.8: Multi-factor combinations — HIGHEST PRIORITY
+    "combo_factor": 4.0,  # Griff's proven strategy (S=2.15)
+    # v5.9: NEW families — model77 pre-computed anomalies (HIGHEST PRIORITY)
+    "model77_anomaly": 5.0,   # 168 untapped pre-computed academic anomaly fields
+    "model77_combo": 4.5,     # model77 + price reversion combos
+    "relationship": 3.5,      # Supply chain / customer-competitor spillover
+    "risk_beta": 3.5,         # Betting against beta / idiosyncratic vol
+    "expanded_fundamental": 4.0,  # Accruals, asset growth, profitability, net issuance
+    "analyst_estimates": 3.5,     # Forward-looking analyst data
+    "wq_proven": 4.0,            # WQ-documented proven expressions
 }
 
 
@@ -69,16 +81,33 @@ class AlphaGenerator:
             settings=settings,
         )
 
-    def create_from_expression(self, raw_expr: str, settings_bias=None) -> Candidate:
+    def create_from_expression(self, raw_expr: str, settings_bias=None, settings_override=None) -> Candidate:
         """
         v5.6: Create a Candidate from a raw LLM-generated expression.
         Classifies the expression into a family, generates settings, and wraps it.
+        v6.0: settings_override dict directly sets universe/neutralization/decay/truncation.
         """
         expr = raw_expr.strip()
         family = self._classify_llm_family(expr)
         template_id = f"llm_{family[:4]}"
 
-        settings = self._sample_settings(family, settings_bias=settings_bias)
+        if settings_override:
+            # v6.0: Optuna-suggested settings — build Settings object directly
+            from models import Settings
+            settings = Settings(
+                region="USA",
+                universe=settings_override.get("universe", "TOP3000"),
+                delay=1,
+                decay=int(settings_override.get("decay", 6)),
+                neutralization=settings_override.get("neutralization", "SUBINDUSTRY"),
+                truncation=float(settings_override.get("truncation", 0.08)),
+                pasteurization="ON",
+                unit_handling="VERIFY",
+                nan_handling="OFF",
+            )
+        else:
+            settings = self._sample_settings(family, settings_bias=settings_bias)
+
         canon = canonicalize_expression(expr)
         h = hash_candidate(canon, settings.to_dict())
         fields = self._extract_fields(expr, {})
@@ -97,6 +126,67 @@ class AlphaGenerator:
     def _classify_llm_family(self, expr: str) -> str:
         """Classify an LLM-generated expression into a family for tracking."""
         expr_lower = expr.lower()
+
+        # v5.9: Detect model77 pre-computed anomaly fields
+        model77_keywords = [
+            "standardized_unexpected_earnings", "earnings_momentum_composite",
+            "earnings_revision_magnitude", "asset_growth_rate", "gross_profit_to_assets",
+            "tobins_q_ratio", "distress_risk_measure", "trailing_twelve_month_accruals",
+            "forward_median_earnings_yield", "cash_flow_return_on_invested",
+            "twelve_month_short_interest", "financial_statement_value_score",
+            "fcf_yield_times_forward", "value_momentum_analyst", "momentum_analyst_composite",
+            "normalized_earnings_yield", "equity_value_score", "income_statement_value_score",
+            "credit_risk_premium", "sustainable_growth_rate", "reinvestment_rate",
+            "price_momentum_module", "fundamental_growth_module", "sales_surprise_score",
+            "ttm_operating_cash_flow", "ttm_operating_income_to_ev", "ttm_sales_to_enterprise",
+            "industry_relative_return", "industry_relative_book", "industry_relative_fcf",
+            "implied_minus_realized_volatility_2", "out_of_money_put_call",
+            "visibility_ratio", "treynor_ratio", "cash_burn_rate",
+            "capex_to_total_assets", "capex_to_depreciation",
+        ]
+        has_model77 = any(f in expr_lower for f in model77_keywords)
+        if has_model77:
+            # Check if it's a combo (model77 + price)
+            has_price = any(f in expr_lower for f in ["returns", "close", "vwap"])
+            if has_price and (" + " in expr_lower or ") + -" in expr_lower):
+                return "model77_combo"
+            return "model77_anomaly"
+
+        # v5.9: Detect relationship/supply chain data
+        if any(f in expr_lower for f in ["rel_ret_", "rel_num_", "pv13_"]):
+            return "relationship"
+
+        # v5.9: Detect risk/beta fields
+        if any(f in expr_lower for f in ["beta_last_", "correlation_last_", "unsystematic_risk", "systematic_risk"]):
+            return "risk_beta"
+
+        # v5.9: Detect expanded fundamental fields
+        if any(f in expr_lower for f in [
+            "retained_earnings", "working_capital", "inventory_turnover",
+            "rd_expense", "sharesout", "operating_income", "return_assets",
+            "return_equity", "goodwill", "fn_liab_fair_val",
+        ]):
+            return "expanded_fundamental"
+
+        # v5.9: Detect analyst estimate fields (forward-looking)
+        if any(f in expr_lower for f in ["est_eps", "est_fcf", "est_ptp", "est_cashflow_op", "est_capex"]):
+            return "analyst_estimates"
+
+        # v5.8: Detect multi-factor combinations (A + B pattern with different data sources)
+        if " + " in expr_lower or ") + -" in expr_lower or ") + rank" in expr_lower:
+            has_fundamental = any(f in expr_lower for f in [
+                "debt", "equity", "assets", "sales", "cashflow", "ebitda", "bookvalue",
+                "fscore_", "income", "eps", "enterprise_value",
+            ])
+            has_price = any(f in expr_lower for f in [
+                "returns", "close", "vwap", "open", "high", "low",
+            ])
+            has_options = any(f in expr_lower for f in ["implied_volatility", "pcr_"])
+            has_earnings = any(f in expr_lower for f in ["snt1_d1_", "consensus_analyst"])
+            has_sentiment = any(f in expr_lower for f in ["scl12_", "news_", "rp_ess_", "rp_css_"])
+            categories = sum([has_fundamental, has_price, has_options, has_earnings, has_sentiment])
+            if categories >= 2:
+                return "combo_factor"
 
         if any(f in expr_lower for f in ["implied_volatility", "historical_volatility", "pcr_"]):
             return "options_vol"
@@ -152,6 +242,27 @@ class AlphaGenerator:
 
         # Settings-only refinement: sub_universe_sharpe is a settings problem
         if mode == "sub_universe_sharpe":
+            original_expr = row["canonical_expression"]
+            settings = self._mutate_settings(settings, mode=mode, family=family)
+            sim = SimulationSettings(**settings)
+            canon = canonicalize_expression(original_expr)
+            h = hash_candidate(canon, sim.to_dict())
+
+            return Candidate.create(
+                expression=original_expr,
+                canonical_expression=canon,
+                expression_hash=h,
+                template_id=template_id,
+                family=family,
+                fields=self._extract_fields(original_expr, params),
+                params=params,
+                settings=sim,
+            )
+
+        # v5.9: Settings sweep — keep same expression, try DIFFERENT neutralization/universe
+        # This is the "legendary refinement" for near-passers like Sharpe 1.34 / Fitness 0.71
+        # The expression is good — it just needs the right settings context
+        if mode == "settings_sweep":
             original_expr = row["canonical_expression"]
             settings = self._mutate_settings(settings, mode=mode, family=family)
             sim = SimulationSettings(**settings)
@@ -300,6 +411,15 @@ class AlphaGenerator:
             return "concentrated_weight"
         if "LOW_SUB_UNIVERSE_SHARPE" in txt or "SUB_UNIVERSE" in txt:
             return "sub_universe_sharpe"
+
+        # v5.9: Settings sweep — for near-passers, 40% chance of trying
+        # a completely different neutralization/universe combo instead of
+        # tweaking parameters. This is the single highest-impact refinement.
+        if metrics_hint:
+            sharpe = self._safe_float(metrics_hint.get("sharpe"))
+            if sharpe is not None and sharpe >= 1.20 and self.rng.random() < 0.40:
+                return "settings_sweep"
+
         if "LOW_FITNESS" in txt:
             return "fitness"
         if "HIGH_TURNOVER" in txt:
@@ -446,6 +566,34 @@ class AlphaGenerator:
         if expr.count("rank(") >= 3 or expr.count("ts_mean(") >= 3 or expr.count("ts_decay_linear(") >= 2:
             return expr
 
+        # v5.9.1: Signal-aware smoothing (research: optimal decay varies by data type)
+        # Multiplicative combos and q-theory composites — already complex, reduce smoothing
+        if template_id and template_id.startswith("m7c_") and template_id in {"m7c_05", "m7c_06", "m7c_07", "m7c_08", "m7c_09", "m7c_10", "m7c_11", "m7c_12", "m7c_13", "m7c_14", "m7c_15"}:
+            force_smoothing = False
+            light = True  # Only light smoothing for complex expressions
+
+        # Family-specific smoothing parameters
+        if family in {"model77_anomaly", "model77_combo", "expanded_fundamental", "fundamental_value", "quality_trend", "size_value"}:
+            # Fundamentals: longer windows, ts_decay_linear preferred
+            smooth_windows = [5, 8, 10]
+            decay_prob = 0.60  # Prefer ts_decay_linear for fundamentals
+        elif family in {"news_sentiment"}:
+            # News: short windows only (signal decays fast)
+            smooth_windows = [3, 5]
+            decay_prob = 0.70  # Strong preference for ts_decay_linear
+        elif family in {"relationship"}:
+            # Customer momentum: longer windows (persists for weeks)
+            smooth_windows = [5, 10, 15]
+            decay_prob = 0.65
+        elif family in {"analyst_estimates", "earnings_momentum"}:
+            # Analyst: medium windows, slight decay preference
+            smooth_windows = [5, 10]
+            decay_prob = 0.55
+        else:
+            # Price-based: default
+            smooth_windows = [3, 5, 10]
+            decay_prob = 0.40
+
         if force_smoothing:
             smoothing_prob = 0.78
         elif light:
@@ -456,22 +604,14 @@ class AlphaGenerator:
         already_smoothed = expr.startswith("ts_mean(") or expr.startswith("ts_decay_linear(")
         if self.rng.random() < smoothing_prob and not already_smoothed:
             if force_smoothing:
-                # Fitness/turnover: data shows window=8-10 + ts_decay_linear = best fitness
                 win = self.rng.choice([5, 8, 10, 10])
                 if self.rng.random() < 0.55:
                     expr = f"ts_decay_linear(rank({expr}), {win})"
                 else:
                     expr = f"ts_mean(rank({expr}), {win})"
-            elif light:
-                win_choices = getattr(config, "PREFER_TS_MEAN_WINDOW", [3, 5])
-                win = self.rng.choice(win_choices)
-                if self.rng.random() < 0.35:
-                    expr = f"ts_decay_linear(rank({expr}), {win})"
-                else:
-                    expr = f"ts_mean(rank({expr}), {win})"
             else:
-                win = self.rng.choice([3, 5, 10])
-                if self.rng.random() < 0.40:
+                win = self.rng.choice(smooth_windows)
+                if self.rng.random() < decay_prob:
                     expr = f"ts_decay_linear(rank({expr}), {win})"
                 else:
                     expr = f"ts_mean(rank({expr}), {win})"
@@ -497,13 +637,22 @@ class AlphaGenerator:
         fundamental_families = {"fundamental_value", "quality_trend", "size_value"}
         use_fund_params = family in fundamental_families
 
+        # v5.8: combo_factor uses MIXED params — {n} for fundamental (moderate lookback), {m} for price (short)
+        is_combo = family == "combo_factor"
+
         if "{n}" in template:
-            if use_fund_params:
+            if is_combo:
+                # Fundamental component lookback (Griff used 30-40)
+                p["n"] = self.rng.choice([20, 30, 40, 60])
+            elif use_fund_params:
                 p["n"] = self.rng.choice(getattr(templates_mod, "FUNDAMENTAL_PARAM_RANGES", {}).get("n", self._grid("n")))
             else:
                 p["n"] = self.rng.choice(self._grid("n"))
         if "{m}" in template:
-            if use_fund_params:
+            if is_combo:
+                # Price reversion component (Griff used 3-5)
+                p["m"] = self.rng.choice([3, 5, 10])
+            elif use_fund_params:
                 p["m"] = self.rng.choice(getattr(templates_mod, "FUNDAMENTAL_PARAM_RANGES", {}).get("m", self._grid("m")))
             else:
                 p["m"] = self.rng.choice(self._grid("m"))
@@ -530,6 +679,12 @@ class AlphaGenerator:
             p["derivative_field"] = self.rng.choice(DERIVATIVE_FIELDS)
         if "{pcr_window}" in template:
             p["pcr_window"] = self.rng.choice(PCR_WINDOWS)
+        # v5.9: model77 field sampling with tier weighting
+        if "{model77_field}" in template:
+            if self.rng.random() < 0.70:
+                p["model77_field"] = self.rng.choice(MODEL77_TIER1_FIELDS)
+            else:
+                p["model77_field"] = self.rng.choice(MODEL77_TIER2_FIELDS)
         return p
 
     def _mutate_params_for_mode(self, params, template, mode: str, metrics_hint: dict[str, Any] | None = None):
@@ -609,6 +764,20 @@ class AlphaGenerator:
         if "{fscore_field}" in template and "fscore_field" not in out:
             out["fscore_field"] = self.rng.choice(FSCORE_FIELDS)
 
+        # v5.9: model77 field mutation
+        if "model77_field" in out and self.rng.random() < 0.20:
+            # Mutate to a different model77 field (higher mutation rate — huge field space)
+            if self.rng.random() < 0.70:
+                out["model77_field"] = self.rng.choice(MODEL77_TIER1_FIELDS)
+            else:
+                out["model77_field"] = self.rng.choice(MODEL77_TIER2_FIELDS)
+
+        if "{model77_field}" in template and "model77_field" not in out:
+            if self.rng.random() < 0.70:
+                out["model77_field"] = self.rng.choice(MODEL77_TIER1_FIELDS)
+            else:
+                out["model77_field"] = self.rng.choice(MODEL77_TIER2_FIELDS)
+
         return out
 
     def _mutate(self, val, grid, stay_prob: float = 0.35):
@@ -660,11 +829,37 @@ class AlphaGenerator:
     def _mutate_settings(self, s, mode: str = "general", family: str = ""):
         out = dict(s)
 
+        # v5.9: Settings sweep — systematically try ALL neutralization × universe combos
+        # Triggered for high-Sharpe near-passers (e.g., Sharpe 1.34 / Fitness 0.71)
+        # This is the "legendary refinement" — the single highest-impact settings change
+        if mode == "settings_sweep":
+            # ALWAYS change neutralization to something DIFFERENT from current
+            current_neut = out.get("neutralization", "")
+            # Use dataset-aware recommendations first, then all options
+            neut_pool = DATASET_NEUTRALIZATION.get(family, config.DEFAULT_NEUTRALIZATIONS)
+            neut_options = [n for n in neut_pool if n != current_neut]
+            if not neut_options:
+                neut_options = [n for n in config.DEFAULT_NEUTRALIZATIONS if n != current_neut]
+            if neut_options:
+                out["neutralization"] = self.rng.choice(neut_options)
+
+            # Also try a different universe (50% of the time)
+            if self.rng.random() < 0.50:
+                current_univ = out.get("universe", "")
+                univ_options = [u for u in config.DEFAULT_UNIVERSES if u != current_univ]
+                if univ_options:
+                    out["universe"] = self.rng.choice(univ_options)
+
+            # Also try a different decay (40% of the time)
+            if self.rng.random() < 0.40:
+                decay_grid = list(config.DEFAULT_DECAYS)
+                out["decay"] = self.rng.choice(decay_grid)
+
+            return out
+
         if "decay" in out:
             decay_grid = list(config.DEFAULT_DECAYS)
             if family == "volume_flow" and mode in {"fitness", "turnover"}:
-                # Volume-flow alphas are inherently high-turnover — push decay hard
-                # Data shows vol_03 near-passers at fitness 0.92-0.98 need decay 8-12
                 high_decay = [d for d in decay_grid if d >= 8] or decay_grid[-2:]
                 out["decay"] = self.rng.choice(high_decay)
             elif mode in {"fitness", "turnover"}:
@@ -674,16 +869,18 @@ class AlphaGenerator:
             else:
                 out["decay"] = self._mutate(out["decay"], decay_grid, stay_prob=0.25)
 
-        # More aggressive neutralization mutation for fitness
+        # v5.9: Dataset-aware neutralization during refinement
         neut_prob = 0.40 if mode == "fitness" else (0.25 if mode == "turnover" else 0.18)
         if mode == "concentrated_weight":
             neut_prob = 0.50
         if "neutralization" in out and self.rng.random() < neut_prob:
-            out["neutralization"] = self.rng.choice(config.DEFAULT_NEUTRALIZATIONS)
+            if family in DATASET_NEUTRALIZATION and self.rng.random() < 0.70:
+                out["neutralization"] = self.rng.choice(DATASET_NEUTRALIZATION[family])
+            else:
+                out["neutralization"] = self.rng.choice(config.DEFAULT_NEUTRALIZATIONS)
 
         # Truncation — CRITICAL for concentrated_weight failures
         if mode == "concentrated_weight":
-            # Force lower truncation to spread weight across more stocks
             out["truncation"] = self.rng.choice([0.03, 0.05])
         else:
             trunc_prob = 0.30 if mode in {"fitness", "turnover"} else 0.10
@@ -692,8 +889,6 @@ class AlphaGenerator:
 
         # Universe — CRITICAL for sub_universe_sharpe failures
         if mode == "sub_universe_sharpe":
-            # Try intermediate universes — TOPSP500 kills some signals entirely
-            # TOP1000 and TOP500 are better starting points
             sub_universe_options = ["TOP1000", "TOP500", "TOPSP500"]
             out["universe"] = self.rng.choice(sub_universe_options)
         else:
@@ -705,15 +900,14 @@ class AlphaGenerator:
 
     def _sample_settings(self, family, settings_bias=None):
         """
-        v5.7: Signal-class-aware settings sampling.
+        v5.9: Dataset-aware settings sampling.
 
-        Uses signal class profiles from config when available (85% of the time).
-        Falls back to adaptive sampling for exploration (15%) or unknown families.
+        Uses DATASET_NEUTRALIZATION from official WQ Neutralisation.csv (75% of time).
+        Falls back to adaptive sampling for exploration (25%).
         """
         EXPLORE_PROB = 0.20
         FLOOR_WEIGHT = 0.25
         CEILING_WEIGHT = 2.50
-        MIN_OBS = 8
 
         def weighted_choice(options, dimension_bias):
             """Pick from options using bias weights, with exploration."""
@@ -732,16 +926,27 @@ class AlphaGenerator:
         # v5.7: Use signal-class settings profile if available
         profile = getattr(config, "SIGNAL_CLASS_SETTINGS", {}).get(family)
         if profile and self.rng.random() > 0.15:  # 85% use profile, 15% explore
+            # v5.9: Override neutralization with dataset-aware recommendation
+            neut_options = DATASET_NEUTRALIZATION.get(family, profile.get("neutralizations", config.DEFAULT_NEUTRALIZATIONS))
             return SimulationSettings(
                 region=config.DEFAULT_REGION,
                 universe=self.rng.choice(profile.get("universes", config.DEFAULT_UNIVERSES)),
                 delay=config.DEFAULT_DELAY,
                 decay=self.rng.choice(profile.get("decays", config.DEFAULT_DECAYS)),
-                neutralization=self.rng.choice(profile.get("neutralizations", config.DEFAULT_NEUTRALIZATIONS)),
+                neutralization=self.rng.choice(neut_options),
                 truncation=self.rng.choice(profile.get("truncations", config.DEFAULT_TRUNCATIONS)),
             )
 
         bias = settings_bias or {}
+
+        # v5.9: Dataset-aware neutralization — 75% use recommended, 25% explore
+        if family in DATASET_NEUTRALIZATION and self.rng.random() < 0.75:
+            neut = self.rng.choice(DATASET_NEUTRALIZATION[family])
+        else:
+            neut = weighted_choice(
+                config.DEFAULT_NEUTRALIZATIONS,
+                bias.get("neutralization"),
+            )
 
         return SimulationSettings(
             region=config.DEFAULT_REGION,
@@ -754,10 +959,7 @@ class AlphaGenerator:
                 config.DEFAULT_DECAYS,
                 bias.get("decay"),
             ),
-            neutralization=weighted_choice(
-                config.DEFAULT_NEUTRALIZATIONS,
-                bias.get("neutralization"),
-            ),
+            neutralization=neut,
             truncation=weighted_choice(
                 config.DEFAULT_TRUNCATIONS,
                 bias.get("truncation"),

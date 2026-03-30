@@ -830,3 +830,90 @@ class Storage:
             message="manually_registered",
         )
         return True
+
+    # =========================================================
+    # v6.0: Optuna settings optimizer queries
+    # =========================================================
+
+    def get_runs_for_expression(self, expression: str) -> list[dict]:
+        """Get all completed runs for a specific expression with settings and metrics."""
+        import json as _json
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT r.run_id, c.settings_json, m.sharpe, m.fitness, m.turnover
+                FROM candidates c
+                JOIN runs r ON c.candidate_id = r.candidate_id
+                LEFT JOIN metrics m ON r.run_id = m.run_id
+                WHERE c.canonical_expression = ? AND r.status = 'completed'
+                ORDER BY m.fitness DESC
+                LIMIT 50
+                """,
+                (expression,),
+            ).fetchall()
+        return [
+            {
+                "run_id": row["run_id"],
+                "settings_json": _json.loads(row["settings_json"]) if row["settings_json"] else {},
+                "sharpe": row["sharpe"],
+                "fitness": row["fitness"],
+                "turnover": row["turnover"],
+            }
+            for row in rows
+        ]
+
+    def get_runs_for_core_signal(self, core_signal: str) -> list[dict]:
+        """Get completed runs whose expression contains the core signal."""
+        import json as _json
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT r.run_id, c.settings_json, m.sharpe, m.fitness, m.turnover
+                FROM candidates c
+                JOIN runs r ON c.candidate_id = r.candidate_id
+                LEFT JOIN metrics m ON r.run_id = m.run_id
+                WHERE c.canonical_expression LIKE ? AND r.status = 'completed'
+                  AND m.fitness IS NOT NULL
+                ORDER BY m.fitness DESC
+                LIMIT 30
+                """,
+                (f"%{core_signal[:40]}%",),
+            ).fetchall()
+        return [
+            {
+                "run_id": row["run_id"],
+                "settings_json": _json.loads(row["settings_json"]) if row["settings_json"] else {},
+                "sharpe": row["sharpe"],
+                "fitness": row["fitness"],
+                "turnover": row["turnover"],
+            }
+            for row in rows
+        ]
+
+    def get_runs_for_family(self, family: str) -> list[dict]:
+        """Get top completed runs from same family for cross-pollination."""
+        import json as _json
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT r.run_id, c.settings_json, m.sharpe, m.fitness, m.turnover
+                FROM candidates c
+                JOIN runs r ON c.candidate_id = r.candidate_id
+                LEFT JOIN metrics m ON r.run_id = m.run_id
+                WHERE c.family = ? AND r.status = 'completed'
+                  AND m.fitness > 0.5
+                ORDER BY m.fitness DESC
+                LIMIT 30
+                """,
+                (family,),
+            ).fetchall()
+        return [
+            {
+                "run_id": row["run_id"],
+                "settings_json": _json.loads(row["settings_json"]) if row["settings_json"] else {},
+                "sharpe": row["sharpe"],
+                "fitness": row["fitness"],
+                "turnover": row["turnover"],
+            }
+            for row in rows
+        ]

@@ -12,6 +12,12 @@ from storage import Storage
 from similarity import SimilarityEngine
 from brain_client import BrainClient, BrainAPIError
 
+try:
+    from settings_optimizer import SettingsOptimizer
+    _HAS_OPTUNA = True
+except ImportError:
+    _HAS_OPTUNA = False
+
 
 class AlphaBot:
     """
@@ -41,7 +47,23 @@ class AlphaBot:
         self.core_signal_exhausted: dict[str, int] = {}  # core_signal → exhaustion count
         self.family_template_exhausted: dict[str, int] = {}  # "family:template_id" → exhaustion count
         self.concentrated_weight_exprs: set[str] = set()  # v5.5: canonical expressions that fail CONCENTRATED_WEIGHT
+        # v5.8: Track FIELDS that cause CW when unweighted — prevents fscore waste
+        self.concentrated_weight_fields: set[str] = set()
+        # v5.9.1: Core signals that already passed — skip variants before simulation
+        self.passed_cores: set[str] = set()
+        # v6.0: Track refinement attempts per CORE SIGNAL to prevent same expression via different candidates
+        self.refinement_attempts_by_core: dict[str, int] = {}
+        # v6.0: Track recently simulated LLM expressions to prevent duplicates
+        self.llm_simulated_expressions: set[str] = set()
         self.similarity_engine = SimilarityEngine()
+
+        # v6.0: Optuna-based settings optimizer for near-passers
+        if _HAS_OPTUNA:
+            self.settings_optimizer = SettingsOptimizer(storage)
+            print("[OPTUNA] Settings optimizer available")
+        else:
+            self.settings_optimizer = None
+            print("[OPTUNA] optuna not installed — using random settings sweep")
 
         # v5.6: LLM-guided generation
         self.llm_generator = LLMAlphaGenerator()
@@ -121,12 +143,23 @@ class AlphaBot:
     # =========================================================
 
     def _handle_completed(self, run_id: str, result: dict) -> None:
-        self.storage.update_run(
-            run_id,
-            status="completed",
-            completed_at=utc_now(),
-            raw_result=result,
+        # v5.9.1: Extract alpha_id and store it — needed for submission flow
+        alpha_id = (
+            result.get("alpha_id")
+            or result.get("raw", {}).get("alpha_id")
+            or result.get("raw", {}).get("id")
+            or result.get("raw", {}).get("alpha")
         )
+
+        update_kwargs = {
+            "status": "completed",
+            "completed_at": utc_now(),
+            "raw_result": result,
+        }
+        if alpha_id:
+            update_kwargs["alpha_id"] = alpha_id
+
+        self.storage.update_run(run_id, **update_kwargs)
 
         run_row = self.storage.get_run_by_id(run_id)
         if run_row is None:
@@ -151,6 +184,27 @@ class AlphaBot:
                         f"[CW_BLACKLIST] expr={cw_expr} "
                         f"total_blacklisted={len(self.concentrated_weight_exprs)}"
                     )
+                # v5.8: Extract fields that cause CW when unweighted
+                # If expression uses fscore/derivative fields WITHOUT rank(cap)/rank(adv20), flag the field
+                cw_expr_lower = cw_expr.lower()
+                _CW_RISK_FIELDS = [
+                    "fscore_bfl_value", "fscore_bfl_momentum", "fscore_bfl_quality",
+                    "fscore_bfl_growth", "fscore_bfl_profitability", "fscore_bfl_total",
+                    "fscore_bfl_surface", "fscore_bfl_surface_accel",
+                    "fscore_value", "fscore_momentum", "fscore_quality", "fscore_growth",
+                    "cashflow_efficiency_rank_derivative", "composite_factor_score_derivative",
+                    "earnings_certainty_rank_derivative", "growth_potential_rank_derivative",
+                    "analyst_revision_rank_derivative", "relative_valuation_rank_derivative",
+                ]
+                has_liquidity_weight = "rank(cap)" in cw_expr_lower or "rank(adv20)" in cw_expr_lower or "rank(adv" in cw_expr_lower
+                if not has_liquidity_weight:
+                    for field in _CW_RISK_FIELDS:
+                        if field in cw_expr_lower and field not in self.concentrated_weight_fields:
+                            self.concentrated_weight_fields.add(field)
+                            print(
+                                f"[CW_FIELD_BLACKLIST] field={field} — unweighted use causes CW "
+                                f"total_fields_blocked={len(self.concentrated_weight_fields)}"
+                            )
 
         # v5.6.1: Record LLM expression failures for feedback
         if self.llm_generator.available and metrics.sharpe is not None and metrics.sharpe < 0.5:
@@ -181,6 +235,18 @@ class AlphaBot:
         # check be the judge. v5.4 blocked 6 eligible alphas that may have passed.
         # The data-category proxy was wrong — cost us real submissions.
         if decision.should_submit:
+            # v5.9.1: Record core signal so we skip future variants BEFORE simulation
+            candidate_row = self.storage.get_candidate_by_id(candidate_id)
+            if candidate_row:
+                core = self._extract_core_signal(candidate_row.get("canonical_expression", ""))
+                if core and core not in self.passed_cores:
+                    self.passed_cores.add(core)
+                    print(
+                        f"[CORE_PASSED] core='{core[:80]}' "
+                        f"total_passed_cores={len(self.passed_cores)} — "
+                        f"future variants will be skipped before simulation"
+                    )
+
             # Log data category for analytics (but NEVER block)
             portfolio_info = self._check_submission_portfolio_fit(
                 candidate_id=candidate_id,
@@ -283,6 +349,12 @@ class AlphaBot:
             )
 
     def _attempt_submission(self, candidate_id: str, run_id: str, result: dict) -> None:
+        """
+        v5.9.1: Submit alpha using the verified API flow.
+
+        POST /alphas/{id}/submit → poll GET → parse 200 (pass) or 403 (fail).
+        Failed submissions don't count against daily cap.
+        """
         alpha_id = (
             result.get("alpha_id")
             or result.get("raw", {}).get("alpha_id")
@@ -294,64 +366,56 @@ class AlphaBot:
             print(f"[SUBMIT_SKIP] run_id={run_id} reason=no_alpha_id_found raw_keys={list(result.get('raw', {}).keys())}")
             return
 
-        # Get sim_id for PATCH approach (teammate's method)
-        sim_id = None
-        run_row = self.storage.get_run_by_id(run_id)
-        if run_row:
-            sim_id = run_row["sim_id"]
-
-        print(f"[SUBMIT_STARTING] run_id={run_id} alpha_id={alpha_id} sim_id={sim_id}")
+        print(f"[SUBMIT_STARTING] run_id={run_id} alpha_id={alpha_id}")
 
         try:
-            submission_response = self.client.submit_alpha(alpha_id, sim_id=sim_id)
+            sub_result = self.client.submit_alpha(alpha_id)
+            accepted = sub_result.get("_accepted")
+            self_corr = sub_result.get("_self_correlation")
+            corr_with = sub_result.get("_correlated_with")
+            fail_reason = sub_result.get("_fail_reason")
 
-            # v5.5: Use the _verified flag from brain_client's verify step
-            verified = submission_response.get("_verified")
-            wq_status = submission_response.get("_wq_status", "?")
-            wq_stage = submission_response.get("_wq_stage", "?")
-
-            if verified is True:
-                # WQ confirmed it's submitted/active — record as confirmed
+            if accepted is True:
                 self.storage.insert_submission(
                     submission_id=new_id("sub"),
                     candidate_id=candidate_id,
                     run_id=run_id,
                     submitted_at=utc_now(),
                     submission_status="confirmed",
-                    message=f"verified: status={wq_status} stage={wq_stage} raw={str(submission_response)[:300]}",
+                    message=f"accepted: self_corr={self_corr}",
                 )
                 print(
                     f"[SUBMIT_CONFIRMED] run_id={run_id} alpha_id={alpha_id} "
-                    f"wq_status={wq_status} wq_stage={wq_stage} ✅ VERIFIED ON WQ"
+                    f"self_correlation={self_corr} ✅ ACCEPTED INTO OS"
                 )
-            elif verified is False:
-                # API returned 2xx but WQ says UNSUBMITTED — do NOT record as submitted
+            elif accepted is False:
+                # Rejected — record but don't count as submitted
                 self.storage.insert_submission(
                     submission_id=new_id("sub"),
                     candidate_id=candidate_id,
                     run_id=run_id,
                     submitted_at=utc_now(),
-                    submission_status="unverified",
-                    message=f"API OK but WQ status={wq_status} stage={wq_stage} — NOT actually submitted",
+                    submission_status="rejected",
+                    message=f"rejected: {fail_reason} self_corr={self_corr} correlated_with={corr_with}",
                 )
                 print(
-                    f"[SUBMIT_UNVERIFIED] run_id={run_id} alpha_id={alpha_id} "
-                    f"wq_status={wq_status} wq_stage={wq_stage} "
-                    f"⚠️ API returned OK but WQ did NOT accept — check manually"
+                    f"[SUBMIT_REJECTED] run_id={run_id} alpha_id={alpha_id} "
+                    f"reason={fail_reason} self_corr={self_corr} "
+                    f"correlated_with={corr_with} ❌ NOT ACCEPTED"
                 )
             else:
-                # Couldn't verify (network error on verify call) — record as pending
+                # Timeout or unknown
                 self.storage.insert_submission(
                     submission_id=new_id("sub"),
                     candidate_id=candidate_id,
                     run_id=run_id,
                     submitted_at=utc_now(),
-                    submission_status="pending_verification",
-                    message=f"verify_failed raw={str(submission_response)[:400]}",
+                    submission_status="unknown",
+                    message=f"timeout_or_unknown: {fail_reason}",
                 )
                 print(
-                    f"[SUBMIT_PENDING] run_id={run_id} alpha_id={alpha_id} "
-                    f"⚠️ Could not verify — check WQ website manually"
+                    f"[SUBMIT_UNKNOWN] run_id={run_id} alpha_id={alpha_id} "
+                    f"reason={fail_reason} ⚠️ CHECK MANUALLY"
                 )
         except Exception as exc:
             self.storage.insert_submission(
@@ -362,7 +426,7 @@ class AlphaBot:
                 submission_status="failed",
                 message=str(exc)[:500],
             )
-            print(f"[SUBMIT_FAILED] run_id={run_id} alpha_id={alpha_id} error={exc}")
+            print(f"[SUBMIT_ERROR] run_id={run_id} alpha_id={alpha_id} error={exc}")
 
     def _check_submission_portfolio_fit(
         self,
@@ -451,24 +515,55 @@ class AlphaBot:
         """
         Classify an expression by its PRIMARY data source.
 
-        WQ docs: "The most effective way to reduce correlation is to use unique datasets."
-        Alphas using the same primary data source will tend to have correlated PnL,
-        even if the expressions look structurally different.
-
-        Categories:
-          - "price_returns": uses close, returns, open, high, low, vwap
-          - "options_vol": uses implied_volatility_*, historical_volatility_*
-          - "fundamental": uses cashflow_op, ebitda, ebit, eps, debt, etc.
-          - "sentiment": uses scl12_*, snt_*, snt1_*
-          - "volume_only": uses only volume/adv20 without price interaction
-          - "factor_model": uses fscore_*, consensus_analyst_rating, etc.
-          - "mixed": uses fields from multiple categories
+        v5.9: Added model77, relationship, risk_beta, analyst_estimates categories.
         """
         expr_lower = expression.lower()
+
+        # v5.9: New data source categories (check first — most specific)
+        has_model77 = any(f in expr_lower for f in [
+            "standardized_unexpected_earnings", "earnings_momentum_composite",
+            "earnings_revision_magnitude", "asset_growth_rate", "gross_profit_to_assets",
+            "tobins_q_ratio", "distress_risk_measure", "trailing_twelve_month_accruals",
+            "forward_median_earnings_yield", "cash_flow_return_on_invested",
+            "twelve_month_short_interest", "financial_statement_value_score",
+            "fcf_yield_times_forward", "value_momentum_analyst",
+            "momentum_analyst_composite", "normalized_earnings_yield",
+            "ttm_operating_cash_flow", "ttm_operating_income_to_ev",
+            "industry_relative_return", "industry_relative_book",
+            "sales_surprise_score", "price_momentum_module",
+            "fundamental_growth_module", "cash_burn_rate",
+        ])
+        has_relationship = any(f in expr_lower for f in [
+            "rel_ret_", "rel_num_", "pv13_",
+        ])
+        has_risk_beta = any(f in expr_lower for f in [
+            "beta_last_", "correlation_last_", "unsystematic_risk", "systematic_risk",
+        ])
+        has_analyst_est = any(f in expr_lower for f in [
+            "est_eps", "est_fcf", "est_ptp", "est_cashflow_op", "est_capex",
+            "est_ebit", "est_ebitda", "est_sales",
+        ])
+        has_expanded_fund = any(f in expr_lower for f in [
+            "retained_earnings", "working_capital", "inventory_turnover",
+            "rd_expense", "operating_income", "return_assets", "return_equity",
+            "fn_liab_fair_val", "sharesout",
+        ])
+
+        if has_model77:
+            return "model77"
+        if has_relationship:
+            return "relationship"
+        if has_risk_beta:
+            return "risk_beta"
+        if has_analyst_est:
+            return "analyst_estimates"
+        if has_expanded_fund:
+            return "expanded_fundamental"
 
         has_options = any(f in expr_lower for f in [
             "implied_volatility", "historical_volatility",
             "call_breakeven", "forward_price", "put_breakeven",
+            "parkinson_volatility",
         ])
         has_sentiment = any(f in expr_lower for f in [
             "scl12_", "snt_", "snt1_",
@@ -479,8 +574,7 @@ class AlphaBot:
             "current_ratio", "cash_st", "assets", "income", "sales",
         ])
         has_factor_model = any(f in expr_lower for f in [
-            "fscore_", "consensus_analyst_rating", "earnings_revision",
-            "asset_growth_rate", "cash_burn_rate",
+            "fscore_", "consensus_analyst_rating",
         ])
         has_price = any(f in expr_lower for f in [
             "returns", "close", "open", "high", "low", "vwap",
@@ -489,14 +583,10 @@ class AlphaBot:
             "volume", "adv20",
         ])
 
-        # Count how many non-price categories are active
-        non_price_categories = sum([has_options, has_sentiment, has_fundamental, has_factor_model])
-
-        # If a non-price data source is the primary signal, classify by that
         if has_options and not has_price:
             return "options_vol"
         if has_options and has_price:
-            return "options_vol"  # Options data is dominant signal even if price is mixed in
+            return "options_vol"
         if has_sentiment:
             return "sentiment"
         if has_fundamental and not has_price:
@@ -504,11 +594,10 @@ class AlphaBot:
         if has_factor_model:
             return "factor_model"
         if has_fundamental and has_price:
-            return "fundamental"  # Fundamental ratios with price are fundamentals-driven
+            return "fundamental"
 
-        # Price-based signals
         if has_price and has_volume:
-            return "price_volume"  # Price-volume interaction (e.g., ts_corr(close, volume))
+            return "price_volume"
         if has_price:
             return "price_returns"
         if has_volume:
@@ -982,6 +1071,9 @@ class AlphaBot:
         all_categories = {
             "options_vol", "sentiment", "fundamental", "factor_model",
             "price_returns", "price_volume", "volume_only",
+            # v5.9: New data source categories
+            "model77", "relationship", "risk_beta",
+            "expanded_fundamental", "analyst_estimates",
         }
         underexplored = sorted(all_categories - submitted_categories)
 
@@ -995,6 +1087,13 @@ class AlphaBot:
 
         if expr is None:
             return None
+
+        # v6.0: Dedup against recently simulated LLM expressions
+        expr_normalized = expr.strip().lower()
+        if expr_normalized in self.llm_simulated_expressions:
+            print(f"[LLM_REPEAT_SKIP] expr={expr[:80]} — already simulated this session")
+            return None
+        self.llm_simulated_expressions.add(expr_normalized)
 
         # Create candidate from the raw expression
         try:
@@ -1012,6 +1111,16 @@ class AlphaBot:
         if candidate.canonical_expression in self.concentrated_weight_exprs:
             print(f"[LLM_CW_BLOCKED] expr={expr[:80]}")
             return None
+
+        # v5.8: Check field-level CW blacklist
+        if self.concentrated_weight_fields:
+            expr_lower = candidate.canonical_expression.lower()
+            has_liq_weight = "rank(cap)" in expr_lower or "rank(adv20)" in expr_lower or "rank(adv" in expr_lower
+            if not has_liq_weight:
+                for field in self.concentrated_weight_fields:
+                    if field in expr_lower:
+                        print(f"[LLM_CW_FIELD_BLOCKED] field={field} expr={expr[:80]}")
+                        return None
 
         print(
             f"[LLM_CANDIDATE] family={candidate.family} template={candidate.template_id} "
@@ -1039,6 +1148,15 @@ class AlphaBot:
                     continue
                 last_base_tried = base_candidate_id
 
+                # v6.0: Check CORE SIGNAL level exhaustion — prevents same expression
+                # from being refined 50+ times via different candidate_ids
+                max_core_refine = getattr(config, "MAX_REFINEMENT_PER_CORE", 15)
+                core = self._extract_core_signal(refinement_row.get("canonical_expression", ""))
+                if core and self.refinement_attempts_by_core.get(core, 0) >= max_core_refine:
+                    self.storage.mark_refinement_consumed(base_candidate_id)
+                    print(f"[CORE_REFINE_CAP] core='{core[:60]}' attempts={self.refinement_attempts_by_core[core]} — skipping")
+                    continue
+
                 if self._should_abandon_refinement_base(base_candidate_id):
                     self.storage.mark_refinement_consumed(base_candidate_id)
                     self.refinement_attempts_by_base.pop(base_candidate_id, None)
@@ -1065,10 +1183,51 @@ class AlphaBot:
                     "fitness": refinement_row["base_fitness"],
                     "turnover": refinement_row["base_turnover"],
                 }
-                candidate = self.generator.mutate_candidate(refinement_row, metrics_hint=metrics_hint)
+
+                # v6.0: Use Optuna for fitness near-passers (high Sharpe, low fitness)
+                use_optuna = (
+                    self.settings_optimizer is not None
+                    and float(refinement_row.get("base_sharpe", 0) or 0) >= 1.25
+                    and float(refinement_row.get("base_fitness", 0) or 0) < 1.0
+                    and float(refinement_row.get("base_fitness", 0) or 0) >= 0.70
+                    and self.generator.rng.random() < 0.60  # 60% Optuna, 40% normal mutation
+                )
+
+                if use_optuna:
+                    suggested = self.settings_optimizer.suggest(
+                        expression=refinement_row.get("canonical_expression", ""),
+                        core_signal=core or "",
+                        family=refinement_row.get("family", ""),
+                    )
+                    if suggested:
+                        # Create candidate with same expression but Optuna-suggested settings
+                        try:
+                            candidate = self.generator.create_from_expression(
+                                refinement_row["canonical_expression"],
+                                settings_override=suggested,
+                            )
+                            print(
+                                f"[OPTUNA_REFINE] base={base_candidate_id[:30]} "
+                                f"S={refinement_row['base_sharpe']:.2f} F={refinement_row['base_fitness']:.2f} "
+                                f"→ univ={suggested['universe']} neut={suggested['neutralization']} "
+                                f"decay={suggested['decay']} trunc={suggested['truncation']}"
+                            )
+                        except Exception as exc:
+                            print(f"[OPTUNA_FAIL] {exc}")
+                            candidate = self.generator.mutate_candidate(refinement_row, metrics_hint=metrics_hint)
+                    else:
+                        candidate = self.generator.mutate_candidate(refinement_row, metrics_hint=metrics_hint)
+                else:
+                    candidate = self.generator.mutate_candidate(refinement_row, metrics_hint=metrics_hint)
+
                 self.refinement_attempts_by_base[base_candidate_id] = (
                     self.refinement_attempts_by_base.get(base_candidate_id, 0) + 1
                 )
+                # v6.0: Track core-level refinement attempts
+                if core:
+                    self.refinement_attempts_by_core[core] = (
+                        self.refinement_attempts_by_core.get(core, 0) + 1
+                    )
 
                 print(
                     f"[REFINING] base_candidate_id={base_candidate_id} "
@@ -1134,6 +1293,35 @@ class AlphaBot:
                     f"expr={candidate.expression} — already failed CONCENTRATED_WEIGHT"
                 )
                 continue
+
+            # v5.8: Block expressions using CW-flagged fields without liquidity weighting
+            if self.concentrated_weight_fields:
+                expr_lower = candidate.canonical_expression.lower()
+                has_liq_weight = "rank(cap)" in expr_lower or "rank(adv20)" in expr_lower or "rank(adv" in expr_lower
+                if not has_liq_weight:
+                    blocked_field = None
+                    for field in self.concentrated_weight_fields:
+                        if field in expr_lower:
+                            blocked_field = field
+                            break
+                    if blocked_field:
+                        print(
+                            f"[CW_FIELD_BLOCKED] template={candidate.template_id} family={candidate.family} "
+                            f"field={blocked_field} — unweighted field known to cause CW"
+                        )
+                        continue
+
+            # v5.9.1: Skip candidates whose core signal already passed
+            # This prevents simulating 23 smoothing variants of the same expression.
+            # Saves ~3 min per variant that would just get rejected by WQ self-correlation.
+            if self.passed_cores:
+                core = self._extract_core_signal(candidate.canonical_expression)
+                if core in self.passed_cores:
+                    print(
+                        f"[CORE_DEDUP] template={candidate.template_id} family={candidate.family} "
+                        f"core='{core[:60]}' — already passed, skipping variant"
+                    )
+                    continue
 
             try:
                 self.storage.insert_candidate(candidate)

@@ -88,18 +88,105 @@ for _prefix in ["call_breakeven_", "forward_price_", "option_breakeven_",
     for _w in [10, 20, 30, 60, 90, 120, 150, 180, 270, 360, 720, 1080]:
         VALID_FIELDS.add(f"{_prefix}{_w}")
 
+# v5.9: Add Parkinson volatility fields
+for _w in [10, 20, 30, 60, 90, 120, 150, 180]:
+    VALID_FIELDS.add(f"parkinson_volatility_{_w}")
+
+# v5.9: model77 pre-computed anomaly fields (Analysts Factor Model)
+VALID_FIELDS.update({
+    "standardized_unexpected_earnings", "standardized_unexpected_earnings_2",
+    "earnings_momentum_composite_score", "earnings_momentum_analyst_score",
+    "earnings_revision_magnitude", "sales_surprise_score",
+    "change_in_eps_surprise", "net_fy1_analyst_revisions",
+    "three_month_fy1_eps_revision", "six_month_avg_fy1_eps_revision",
+    "forward_median_earnings_yield", "normalized_earnings_yield",
+    "forward_cash_flow_to_price", "forward_ebitda_to_enterprise_value_2",
+    "tobins_q_ratio", "financial_statement_value_score",
+    "equity_value_score", "income_statement_value_score",
+    "gross_profit_to_assets_ratio", "gross_profit_margin_ttm_2",
+    "cash_flow_return_on_invested_capital", "cash_earnings_return_on_equity",
+    "return_on_invested_capital_4", "fcf_yield_times_forward_roe",
+    "asset_growth_rate", "one_year_change_total_assets",
+    "sustainable_growth_rate", "reinvestment_rate",
+    "distress_risk_measure", "credit_risk_premium_indicator",
+    "twelve_month_short_interest_change",
+    "value_momentum_analyst_score", "momentum_analyst_composite_score",
+    "price_momentum_module_score", "fundamental_growth_module_score",
+    "trailing_twelve_month_accruals",
+    "standardized_unexpected_cash_flow", "standardized_unexpected_cashflow",
+    "book_leverage_ratio_3", "interest_coverage_ratio_5",
+    "yearly_change_leverage", "twelve_month_total_debt_change_2",
+    "five_year_eps_stability", "one_year_eps_growth_rate",
+    "forward_two_year_eps_growth", "one_year_ahead_eps_growth",
+    "one_quarter_ahead_eps_growth", "long_term_growth_estimate",
+    "capex_to_total_assets", "capex_to_depreciation_linkage",
+    "ttm_operating_cash_flow_to_price", "ttm_operating_income_to_ev",
+    "ttm_sales_to_enterprise_value",
+    "implied_minus_realized_volatility_2", "implied_option_volatility",
+    "out_of_money_put_call_ratio",
+    "industry_relative_return_4w", "industry_relative_return_5d",
+    "industry_relative_book_to_market", "industry_relative_fcf_to_price",
+    "cash_burn_rate", "inventory_change_avg_assets",
+    "rd_expense_to_sales_2", "visibility_ratio", "treynor_ratio",
+})
+
+# v5.9: Relationship / supply chain data (pv13)
+VALID_FIELDS.update({
+    "rel_ret_cust", "rel_ret_comp", "rel_ret_all", "rel_ret_part",
+    "rel_num_cust", "rel_num_comp", "rel_num_all", "rel_num_part",
+    "pv13_ustomergraphrank_page_rank", "pv13_ustomergraphrank_hub_rank",
+    "pv13_ustomergraphrank_auth_rank", "pv13_com_page_rank",
+})
+
+# v5.9: Risk Metrics (model51)
+VALID_FIELDS.update({
+    "beta_last_30_days_spy", "beta_last_60_days_spy",
+    "beta_last_90_days_spy", "beta_last_360_days_spy",
+    "correlation_last_30_days_spy", "correlation_last_60_days_spy",
+    "correlation_last_90_days_spy", "correlation_last_360_days_spy",
+    "systematic_risk_last_30_days", "systematic_risk_last_60_days",
+    "systematic_risk_last_90_days", "systematic_risk_last_360_days",
+    "unsystematic_risk_last_30_days", "unsystematic_risk_last_60_days",
+    "unsystematic_risk_last_90_days", "unsystematic_risk_last_360_days",
+})
+
+# v5.9: Expanded Fundamental fields
+VALID_FIELDS.update({
+    "operating_income", "retained_earnings", "working_capital",
+    "inventory_turnover", "rd_expense", "goodwill", "revenue",
+    "return_assets", "return_equity", "sales_ps", "sales_growth",
+    "sga_expense", "ppent", "pretax_income", "invested_capital",
+    "operating_expense", "income_beforeextra", "income_tax",
+    "interest_expense", "receivable", "liabilities", "liabilities_curr",
+    "fn_liab_fair_val_l1_a", "fn_liab_fair_val_l1_q",
+    "fn_liab_fair_val_a", "fn_liab_fair_val_q",
+})
+
+# v5.9: Additional analyst estimate fields
+VALID_FIELDS.update({
+    "est_eps", "est_epsr", "est_fcf", "est_fcf_ps", "est_ptp",
+    "est_cashflow_op", "est_capex", "est_ebit", "est_ebitda",
+    "est_sales", "est_netprofit", "est_dividend_ps",
+})
+
 
 # ── Operators ───────────────────────────────────────────────────────
 
 VALID_OPERATORS = {
     "rank", "group_rank", "ts_mean", "ts_std_dev", "ts_zscore", "ts_rank",
     "ts_delta", "ts_decay_linear", "ts_corr", "ts_sum", "ts_min", "ts_max",
-    "ts_argmin", "ts_argmax", "ts_covariance", "ts_product", "ts_backfill",
-    "ts_count_nans", "ts_regression", "ts_step",
+    "ts_argmin", "ts_argmax", "ts_arg_max", "ts_covariance", "ts_product", "ts_backfill",
+    "ts_count_nans", "ts_regression", "ts_step", "ts_delay", "ts_scale",
+    "ts_quantile",
     "trade_when", "abs", "log", "sign", "max", "min", "power",
-    "is_nan", "bucket", "densify",
+    "is_nan", "bucket", "densify", "winsorize", "normalize",
+    "group_neutralize", "group_zscore", "group_scale", "group_backfill", "group_mean",
+    "scale", "quantile", "zscore",
     "vec_avg", "vec_count", "vec_sum", "vec_max", "vec_min",
     "vec_stddev", "vec_range", "vec_ir",
+    "signed_power", "sqrt", "inverse", "reverse", "hump",
+    "last_diff_value", "days_from_last_change", "kth_element",
+    "pasteurize",
 }
 
 LOCKED_OPERATORS = {"ts_skewness", "ts_kurtosis", "ts_momentum"}
@@ -224,6 +311,16 @@ STRUCTURAL PATTERNS THAT WORK (from real passing alphas, Sharpe > 1.5):
   rank(ts_zscore(fscore_bfl_total, N)) * rank(adv20)          — fundamental score × liquidity
   group_rank(-ts_zscore(field, N), subindustry)               — within-group relative value
 
+MULTI-FACTOR COMBINATIONS — HIGHEST SHARPE STRATEGY (from real S>1.5 alphas):
+  -rank(close/debt) + -rank(ts_mean(returns, 3))                              — S=1.39, fundamental + reversion
+  -rank(close/debt) + -rank(ts_mean(returns, 5))                              — S=1.73, fundamental + reversion
+  -rank(ts_zscore(debt, 40)) + -rank(ts_mean((close-vwap)/vwap, 3))           — S=1.87, debt trend + vwap reversion
+  rank(sales/assets) + -rank(ts_mean((close-vwap)/vwap, 3))                   — S=1.29, quality + vwap reversion
+  -rank(ts_zscore(debt, 30)) + -rank(ts_mean((close-vwap)/vwap, 3))           — S=2.15, BEST ALPHA IN TEAM
+  The pattern is: rank(signal_A) + rank(signal_B) where A and B use DIFFERENT data sources.
+  Component A: fundamental ratio, debt trend, earnings revision, options IV, or fscore
+  Component B: short-term price reversion (returns mean, vwap deviation, open/close ratio)
+
 WHAT DOES NOT WORK:
   Pure momentum (rank(ts_delta(close, N))) — consistently negative Sharpe
   Simple volatility (rank(1/ts_std_dev(returns,N))) — Sharpe < 1.0
@@ -297,9 +394,12 @@ def _build_generation_prompt(
 {underexplored_section}
 
 Requirements:
+- AT LEAST {max(2, num_expressions // 2)} expressions MUST be multi-factor combinations using the A + B pattern
+  (e.g., rank(fundamental_signal) + -rank(price_reversion_signal))
+  Each component MUST use a DIFFERENT data source (fundamental + price, options + returns, earnings + vwap, etc.)
 - Each expression must use DIFFERENT primary data fields from each other
-- At least 2 expressions should use data from underexplored categories
-- Favor simple, robust expressions (1-3 function calls)
+- At least 1 expression should use data from underexplored categories
+- Favor simple, robust expressions (1-3 function calls per component)
 - Include rank() in every expression
 - For options/news/sentiment data, ALWAYS use ts_backfill(field, 60)
 - For fscore_* fields, ALWAYS multiply by rank(cap) or rank(adv20)
@@ -563,6 +663,7 @@ class LLMAlphaGenerator:
         self._total_api_calls = 0
         self._total_failed_calls = 0
         self._recent_failures: list[dict] = []  # Track failed expressions for feedback
+        self._last_api_call_time: float = 0.0  # v5.9: Rate limit cooldown
 
     @property
     def available(self) -> bool:
@@ -613,6 +714,17 @@ class LLMAlphaGenerator:
         recent_eligible_count: int,
     ) -> None:
         """Call LLM to generate a batch of expressions."""
+        # v5.9: Rate limit cooldown — prevent Gemini 429 errors
+        import config as _cfg
+        cooldown = getattr(_cfg, "LLM_COOLDOWN_SECONDS", 30)
+        now = time.time()
+        elapsed = now - self._last_api_call_time
+        if elapsed < cooldown:
+            wait = cooldown - elapsed
+            print(f"[LLM] Cooldown: waiting {wait:.0f}s before next API call")
+            time.sleep(wait)
+
+        self._last_api_call_time = time.time()
         self._total_api_calls += 1
 
         user_prompt = _build_generation_prompt(
