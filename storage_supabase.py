@@ -209,6 +209,7 @@ class Storage:
     def get_running_runs(self) -> list[dict]:
         return self._get("runs", {
             "status": "eq.running",
+            "owner": f"eq.{self.owner}",
             "select": "*",
         })
 
