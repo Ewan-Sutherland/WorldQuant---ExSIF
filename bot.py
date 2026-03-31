@@ -298,7 +298,10 @@ class AlphaBot:
                 )
 
         decision = evaluate_submission(candidate_id, metrics)
-        self._maybe_queue_refinement(candidate_id, run_id, metrics)
+        try:
+            self._maybe_queue_refinement(candidate_id, run_id, metrics)
+        except Exception as exc:
+            print(f"[REFINEMENT_QUEUE_ERROR] {exc}")
 
         self.completed_runs += 1
 
