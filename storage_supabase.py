@@ -564,6 +564,53 @@ class Storage:
                     expressions.add(cands[0]["canonical_expression"])
         return list(expressions)
 
+    def get_self_correlation_rejections(self, *, limit: int = 500) -> list[dict]:
+        """v6.1: Get candidates that were rejected by WQ for self-correlation."""
+        subs = self._get("submissions", {
+            "select": "candidate_id",
+            "submission_status": "eq.rejected",
+            "message": "like.*SELF_CORRELATION*",
+            "limit": str(limit),
+        })
+        if not subs:
+            return []
+
+        results = []
+        seen = set()
+        for s in subs:
+            cid = s["candidate_id"]
+            if cid in seen:
+                continue
+            seen.add(cid)
+            cands = self._get("candidates", {
+                "select": "canonical_expression,candidate_id",
+                "candidate_id": f"eq.{cid}",
+                "limit": "1",
+            })
+            if cands:
+                results.append({
+                    "canonical_expression": cands[0].get("canonical_expression", ""),
+                    "candidate_id": cid,
+                })
+        return results
+
+    def insert_review_queue(self, *, candidate_id, run_id, expression, core_signal,
+                            family, template_id, sharpe, fitness, turnover, settings_json):
+        """v6.1: Add eligible alpha to review queue for manual submission decision."""
+        self._post("review_queue", {
+            "candidate_id": candidate_id,
+            "run_id": run_id,
+            "expression": expression,
+            "core_signal": core_signal,
+            "family": family,
+            "template_id": template_id,
+            "sharpe": sharpe,
+            "fitness": fitness,
+            "turnover": turnover,
+            "settings_json": settings_json,
+            "status": "pending",
+        })
+
 
 class _EmptyResult:
     """Stub for compatibility with raw SQL execute calls."""

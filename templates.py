@@ -108,6 +108,13 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "cf_08", "expression": "rank(ts_backfill(implied_volatility_call_{opt_window}, 60) / (ts_backfill(historical_volatility_{opt_window}, 60) + 0.001)) + -rank(ts_mean(returns, {n}))"},
         {"template_id": "cf_09", "expression": "rank(ts_zscore({fscore_field}, {n})) * rank(adv20) + -rank(ts_mean(returns, {m}))"},
         {"template_id": "cf_10", "expression": "rank(ts_backfill(scl12_sentiment, 60)) + rank({deep_field} / cap)"},
+        # v6.1: RAW MULTIPLICATIVE combo factors — rank(A * B) form
+        {"template_id": "cf_11", "expression": "rank(({deep_field} / cap) * (-ts_mean(returns, {n})))"},
+        {"template_id": "cf_12", "expression": "rank(ts_zscore({deep_field}, {n}) * (-(close - vwap) / vwap))"},
+        {"template_id": "cf_13", "expression": "rank(({deep_field} / cap) * (-ts_mean((close - vwap) / vwap, {m})))"},
+        # v6.1: GROUP_RANK of fundamental × reversion product
+        {"template_id": "cf_14", "expression": "group_rank(({deep_field} / cap) * (-ts_mean(returns, {n})), industry)"},
+        {"template_id": "cf_15", "expression": "group_rank(ts_zscore({deep_field}, {n}) * (-ts_mean(returns, {m})), subindustry)"},
     ],
 
     # ══════════════════════════════════════════════════════════════════
@@ -145,6 +152,21 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         # v5.9.1: 3-signal composites (weak signals → strong combined)
         {"template_id": "m7c_14", "expression": "rank({model77_field}) + rank(gross_profit_to_assets_ratio) + rank(-ts_mean(returns, {m}))"},
         {"template_id": "m7c_15", "expression": "rank({model77_field}) + rank(-asset_growth_rate) + rank(-ts_mean(returns, {m}))"},
+        # v6.1: RAW MULTIPLICATIVE — rank(A * B) form (research: outperforms rank(A) + rank(B) and rank(A) * rank(B))
+        {"template_id": "m7c_16", "expression": "rank({model77_field} * (-ts_mean(returns, {m})))"},
+        {"template_id": "m7c_17", "expression": "rank({model77_field} * (-(close - vwap) / vwap))"},
+        {"template_id": "m7c_18", "expression": "rank({model77_field} * (-ts_mean((close - vwap) / vwap, {m})))"},
+        {"template_id": "m7c_19", "expression": "rank({model77_field} * ts_backfill(implied_volatility_mean_skew_30, 60))"},
+        {"template_id": "m7c_20", "expression": "rank({model77_field} * snt1_d1_netearningsrevision)"},
+        # v6.1: 3-signal with multiplicative pair + additive third
+        {"template_id": "m7c_21", "expression": "rank({model77_field} * gross_profit_to_assets_ratio) + rank(-ts_mean(returns, {m}))"},
+        {"template_id": "m7c_22", "expression": "rank({model77_field} * (-asset_growth_rate)) + rank(-ts_mean(returns, {m}))"},
+        # v6.1: GROUP_RANK of product — research: outperforms rank() for fundamentals 78% of the time
+        {"template_id": "m7c_23", "expression": "group_rank({model77_field} * (-ts_mean(returns, {m})), industry)"},
+        {"template_id": "m7c_24", "expression": "group_rank({model77_field} * (-ts_mean((close - vwap) / vwap, {m})), subindustry)"},
+        # v6.1: TS_RANK temporal ranking × reversion — best for quarterly fundamental data
+        {"template_id": "m7c_25", "expression": "rank(ts_rank({model77_field}, 252) * (-ts_mean(returns, {m})))"},
+        {"template_id": "m7c_26", "expression": "group_rank(ts_rank({model77_field}, 252) * (-ts_mean(returns, {m})), industry)"},
     ],
     "relationship": [
         {"template_id": "rel_01", "expression": "rank(rel_ret_cust)"},

@@ -196,145 +196,122 @@ LOCKED_OPERATORS = {"ts_skewness", "ts_kurtosis", "ts_momentum"}
 
 SYSTEM_PROMPT = """You are an expert quantitative researcher generating alpha expressions for WorldQuant BRAIN's IQC 2026 competition.
 
-An alpha expression is a mathematical formula that ranks stocks to predict which will outperform or underperform over the next day. Output ONLY raw FastExpression syntax — no Python, no pseudocode, no explanations.
+Your task: generate alpha expressions that predict which stocks will outperform tomorrow.
+Output ONLY raw FastExpression syntax — no Python, no pseudocode.
 
 ═══════════════════════════════════════════════════
-COMPLETE OPERATOR REFERENCE
+THINKING PROCESS (follow this for EVERY expression)
+═══════════════════════════════════════════════════
+
+Step 1: Pick a MARKET INEFFICIENCY to exploit. Examples:
+  - Post-earnings drift (investors underreact to earnings surprises)
+  - Value-momentum crash hedge (cheap stocks with improving momentum)
+  - Implied vs realized volatility gap (options market mispricing)
+  - Analyst herding (revision clusters predict returns)
+  - Liquidity premium (less liquid stocks earn higher returns)
+  - Supply chain contagion (customer returns predict supplier returns)
+  - Short-term mean reversion in high-volume stocks
+  - Quality flight during volatility regimes
+
+Step 2: Choose 1-2 data fields that CAPTURE that inefficiency.
+Step 3: Apply the MINIMUM operators needed — simpler = better fitness.
+Step 4: Verify the expression is structurally different from the submitted list.
+
+═══════════════════════════════════════════════════
+OPERATOR REFERENCE
 ═══════════════════════════════════════════════════
 
 ARITHMETIC: +, -, *, /, abs(x), log(x), sign(x), max(x,y), min(x,y), power(x,n)
 
-RANKING (cross-sectional, applied across all stocks each day):
+RANKING (cross-sectional):
   rank(x)                         — rank stocks 0 to 1
   group_rank(x, group)            — rank within group (industry/subindustry/sector/market)
 
-TIME SERIES (applied per-stock across time):
-  ts_mean(x, n)                   — rolling mean over n days
-  ts_std_dev(x, n)                — rolling standard deviation
-  ts_zscore(x, n)                 — (x - ts_mean(x,n)) / ts_std_dev(x,n)
-  ts_rank(x, n)                   — percentile rank within window
-  ts_delta(x, n)                  — x - x[n days ago]
-  ts_decay_linear(x, n)           — linearly weighted mean (recent days weighted more)
-  ts_corr(x, y, n)                — rolling correlation between x and y
-  ts_sum(x, n)                    — rolling sum
-  ts_min(x, n)                    — rolling minimum
-  ts_max(x, n)                    — rolling maximum
-  ts_argmin(x, n)                 — days since min in window
-  ts_argmax(x, n)                 — days since max in window
-  ts_covariance(x, y, n)          — rolling covariance
-  ts_product(x, n)                — rolling product
-  ts_backfill(x, n)               — fill NaN gaps using last valid value (REQUIRED for options/news data)
-  ts_count_nans(x, n)             — count NaN values in window
-  ts_regression(y, x, n, rettype) — rolling regression (rettype=2 for slope)
-  ts_step(n)                      — generates 1,2,3,...,n sequence (use as x in ts_regression for trend)
+TIME SERIES (per-stock):
+  ts_mean(x, n), ts_std_dev(x, n), ts_zscore(x, n), ts_rank(x, n)
+  ts_delta(x, n), ts_decay_linear(x, n), ts_corr(x, y, n)
+  ts_sum(x, n), ts_min(x, n), ts_max(x, n)
+  ts_argmin(x, n), ts_argmax(x, n), ts_covariance(x, y, n)
+  ts_backfill(x, n)               — fill NaN (REQUIRED for options/news data)
+  ts_regression(y, x, n, rettype) — rettype=2 for slope
+  ts_step(n)                      — sequence 1..n for trend regression
+  ts_scale(x, n)                  — scale to sum to 1
 
 CONDITIONAL:
-  trade_when(cond, x, default)    — use x when cond is true, else default (usually -1)
-
-VECTOR → MATRIX (for news/event vector data):
-  vec_avg(x), vec_count(x), vec_sum(x), vec_max(x), vec_min(x), vec_stddev(x)
-
-GROUPING:
-  bucket(x, range='start, end, step')  — create custom groups
-  densify(group)                        — remove empty groups (use before group_rank)
+  trade_when(cond, x, default)    — use x when cond is true, else default
 
 LOCKED — DO NOT USE: ts_skewness, ts_kurtosis, ts_momentum
 
 ═══════════════════════════════════════════════════
-COMPLETE DATA FIELD REFERENCE
+DATA FIELDS
 ═══════════════════════════════════════════════════
 
-PRICE & VOLUME (updated daily, reliable, no NaN):
-  close, open, high, low, vwap, returns, volume, adv20, cap, sharesout, split, dividend
+PRICE & VOLUME: close, open, high, low, vwap, returns, volume, adv20, cap, sharesout
 
-FUNDAMENTAL DATA (updated quarterly — use lookback windows 60-252):
-  Core: assets, sales, income, cash, debt, equity, eps, ebitda, ebit, enterprise_value
-  Balance Sheet: bookvalue_ps, capex, cashflow, cashflow_op, cogs, cash_st, current_ratio
-  Extended: assets_curr, debt_lt, debt_st, depre_amort, employee, cashflow_dividends,
-            cashflow_fin, cashflow_invst
+FUNDAMENTAL (quarterly, use 60-252 day lookbacks):
+  assets, sales, income, cash, debt, equity, eps, ebitda, ebit, enterprise_value,
+  bookvalue_ps, capex, cashflow, cashflow_op, cogs, current_ratio,
+  assets_curr, debt_lt, debt_st, depre_amort, employee, retained_earnings,
+  operating_income, gross_profit, inventory_turnover, rd_expense
 
-FUNDAMENTAL SCORES (model16 dataset — covers ~1500 stocks, USE ts_backfill OR multiply by rank(cap)):
-  BFL scores: fscore_bfl_value, fscore_bfl_momentum, fscore_bfl_quality,
-              fscore_bfl_growth, fscore_bfl_profitability, fscore_bfl_total,
-              fscore_bfl_surface, fscore_bfl_surface_accel
-  Base scores: fscore_value, fscore_momentum, fscore_quality, fscore_growth,
-               fscore_profitability, fscore_total, fscore_surface, fscore_surface_accel
-  Derivatives: analyst_revision_rank_derivative, cashflow_efficiency_rank_derivative,
-               composite_factor_score_derivative, earnings_certainty_rank_derivative,
-               growth_potential_rank_derivative, relative_valuation_rank_derivative
+FUNDAMENTAL SCORES (model16 — sparse coverage, use ts_backfill or multiply by rank(cap)):
+  fscore_bfl_value, fscore_bfl_momentum, fscore_bfl_quality, fscore_bfl_growth,
+  fscore_bfl_profitability, fscore_bfl_total, fscore_bfl_surface, fscore_bfl_surface_accel
 
-RESEARCH SENTIMENT (sentiment1 — updated daily):
-  snt1_d1_earningssurprise, snt1_d1_netearningsrevision, snt1_d1_earningsrevision,
-  snt1_d1_dynamicfocusrank, snt1_d1_stockrank, snt1_d1_fundamentalfocusrank,
-  snt1_d1_buyrecpercent, snt1_d1_sellrecpercent, snt1_d1_netrecpercent,
-  snt1_d1_longtermepsgrowthest, snt1_d1_analystcoverage,
-  consensus_analyst_rating, snt1_cored1_score
+PRE-COMPUTED ANOMALIES (model77 — ready to use):
+  earnings_momentum_composite_score, earnings_momentum_analyst_score,
+  five_year_eps_stability, forward_ebitda_to_enterprise_value_2,
+  forward_cash_flow_to_price, cash_burn_rate, fcf_yield_times_forward_roe,
+  sustainable_growth_rate, normalized_earnings_yield,
+  gross_profit_to_assets_ratio, asset_growth_rate, industry_relative_return_5d,
+  gross_profit_margin_ttm_2
 
-SOCIAL MEDIA SENTIMENT (socialmedia12):
-  scl12_buzz, scl12_sentiment, scl12_buzz_fast_d1, scl12_sentiment_fast_d1,
-  snt_buzz, snt_buzz_bfl, snt_value, snt_social_value
+ANALYST ESTIMATES: est_eps, est_ptp, est_fcf, est_cashflow_op, est_capex
 
-VOLATILITY DATA (option8 — has NaN, use ts_backfill):
-  implied_volatility_call_{10,20,30,60,90,120,150,180,270,360,720,1080}
-  implied_volatility_put_{10,20,30,60,90,120,150,180,270,360,720,1080}
-  implied_volatility_mean_{10,20,30,60,90,120,150,180,270,360,720,1080}
-  implied_volatility_mean_skew_{10,20,30,60,90,120,150,180,270,360,720,1080}
-  historical_volatility_{10,20,30,60,90,120,150,180}
+RESEARCH SENTIMENT (daily):
+  snt1_d1_earningssurprise, snt1_d1_netearningsrevision, snt1_d1_dynamicfocusrank,
+  snt1_d1_buyrecpercent, snt1_d1_sellrecpercent, consensus_analyst_rating
 
-OPTIONS ANALYTICS (option9 — has NaN, use ts_backfill):
-  pcr_oi_{10,20,30,60,90,120,150,180,270,360,720,1080}   — put-call ratio (open interest)
-  pcr_vol_{10,20,30,60,90,120,150,180,270,360,720,1080}  — put-call ratio (volume)
-  call_breakeven_{10,20,30,60,90,120,180,270,360,720,1080}
-  forward_price_{10,20,30,60,90,120,180,270,360,720,1080}
+SOCIAL MEDIA: scl12_buzz, scl12_sentiment, snt_social_value
 
-RAVENPACK NEWS (event sentiment — has NaN, use ts_backfill):
-  rp_css_earnings, rp_css_revenue, rp_css_dividends, rp_css_mna, rp_css_credit,
-  rp_css_price, rp_css_product, rp_css_technical
-  rp_ess_earnings, rp_ess_revenue, rp_ess_dividends, rp_ess_mna, rp_ess_credit,
-  rp_ess_price, rp_ess_product, rp_ess_technical
+OPTIONS (sparse — ALWAYS use ts_backfill):
+  implied_volatility_call_{30,60,120,180}, implied_volatility_put_{30,60,120,180},
+  implied_volatility_mean_skew_{30,60,120}, parkinson_volatility_{60,120}
+  pcr_oi_{30,60,180,270}, pcr_vol_{30,60,180,270}
 
-US NEWS DATA (news events — has NaN, use ts_backfill):
-  news_pct_1min, news_pct_5_min, news_pct_10min, news_pct_30min, news_pct_60min
-  news_max_up_ret, news_max_dn_ret, news_open_gap, news_ls
+RAVENPACK NEWS (sparse — ALWAYS use ts_backfill):
+  rp_ess_earnings, rp_ess_revenue, rp_css_earnings,
+  news_pct_1min, news_max_up_ret, news_max_dn_ret
 
-ANALYST ESTIMATES:
-  est_ptp, est_fcf, est_cashflow_op, est_capex
+SUPPLY CHAIN: rel_ret_cust, rel_ret_comp, rel_num_cust, rel_num_comp
+
+RISK: beta_last_60_days_spy, unsystematic_risk, systematic_risk
 
 ═══════════════════════════════════════════════════
-RULES AND PATTERNS
+PATTERNS THAT ACTUALLY PASS (Sharpe > 1.25, Fitness > 1.0)
 ═══════════════════════════════════════════════════
 
-STRUCTURAL PATTERNS THAT WORK (from real passing alphas, Sharpe > 1.5):
-  ts_decay_linear(rank(-rank(ts_zscore(returns, N))), M)     — cross-sectional mean reversion
-  rank(-(returns - ts_mean(returns, N)) * rank(adv20))        — liquidity-weighted reversion
-  trade_when(volume > ts_mean(volume, N), rank(-returns), -1) — conditional reversion
-  rank(ts_zscore(fscore_bfl_total, N)) * rank(adv20)          — fundamental score × liquidity
-  group_rank(-ts_zscore(field, N), subindustry)               — within-group relative value
+MULTI-FACTOR (the winning pattern — combine 2 DIFFERENT data sources):
+  rank(signal_A * signal_B)          — multiplicative RAW (best — captures interaction effects)
+  rank(signal_A) * rank(signal_B)    — multiplicative ranked (good)
+  rank(signal_A) + rank(signal_B)    — additive (baseline, weaker than multiplicative)
+  Research shows multiplicative outperforms additive in 65%+ of backtests.
+  Component A: fundamental ratio, debt trend, earnings revision, options IV
+  Component B: short-term price reversion, vwap deviation, volume anomaly
 
-MULTI-FACTOR COMBINATIONS — HIGHEST SHARPE STRATEGY (from real S>1.5 alphas):
-  -rank(close/debt) + -rank(ts_mean(returns, 3))                              — S=1.39, fundamental + reversion
-  -rank(close/debt) + -rank(ts_mean(returns, 5))                              — S=1.73, fundamental + reversion
-  -rank(ts_zscore(debt, 40)) + -rank(ts_mean((close-vwap)/vwap, 3))           — S=1.87, debt trend + vwap reversion
-  rank(sales/assets) + -rank(ts_mean((close-vwap)/vwap, 3))                   — S=1.29, quality + vwap reversion
-  -rank(ts_zscore(debt, 30)) + -rank(ts_mean((close-vwap)/vwap, 3))           — S=2.15, BEST ALPHA IN TEAM
-  The pattern is: rank(signal_A) + rank(signal_B) where A and B use DIFFERENT data sources.
-  Component A: fundamental ratio, debt trend, earnings revision, options IV, or fscore
-  Component B: short-term price reversion (returns mean, vwap deviation, open/close ratio)
+CONDITIONAL ENTRY:
+  trade_when(vol_condition, rank(signal), -1) — only trade during vol regimes
+  trade_when(volume > ts_mean(volume, 40), rank(-returns), -1)
 
-WHAT DOES NOT WORK:
-  Pure momentum (rank(ts_delta(close, N))) — consistently negative Sharpe
-  Simple volatility (rank(1/ts_std_dev(returns,N))) — Sharpe < 1.0
-  Raw fundamental ratios without ranking/smoothing — too noisy
-  Unweighted fscore signals — fail CONCENTRATED_WEIGHT (must multiply by rank(cap) or rank(adv20))
+INDUSTRY-RELATIVE:
+  group_rank(signal, industry)  — outperforms rank() for fundamentals 78% of the time
 
 CRITICAL RULES:
   1. Every expression MUST contain rank() or group_rank()
-  2. For options/news/sentiment data: ALWAYS wrap in ts_backfill(field, 60) first
-  3. For fundamental scores (fscore_*): ALWAYS multiply by rank(cap) or rank(adv20)
-  4. Keep expressions simple: 1-3 nested function calls. Complex = overfit.
-  5. Use ts_decay_linear() or ts_mean() for smoothing — improves fitness
-  6. NEVER use ts_skewness, ts_kurtosis, ts_momentum — they are LOCKED
-  7. Output ONLY the raw expression — no numbering, no explanation, no markdown
+  2. Options/news/sentiment data: ALWAYS wrap in ts_backfill(field, 60) first
+  3. Fundamental scores (fscore_*): ALWAYS multiply by rank(cap) or rank(adv20)
+  4. Keep it simple: 1-3 nested calls. Complex = overfit = low fitness.
+  5. Output ONLY the raw expression — no numbering, no explanation, no markdown
 """
 
 
@@ -347,66 +324,57 @@ def _build_generation_prompt(
     recent_eligible_count: int,
     num_expressions: int = 5,
 ) -> str:
-    """Build the user prompt with context about the current portfolio."""
+    """Build hypothesis-first user prompt with portfolio context."""
 
     submitted_section = ""
     if submitted_exprs:
-        submitted_section = "ALREADY SUBMITTED (do NOT generate similar):\n"
-        for expr in submitted_exprs:
-            submitted_section += f"  - {expr}\n"
+        submitted_section = "ALREADY SUBMITTED — do NOT generate variants of these:\n"
+        for expr in submitted_exprs[:20]:
+            submitted_section += f"  {expr}\n"
 
     near_passer_section = ""
     if best_near_passers:
-        near_passer_section = "\nBEST NEAR-PASSERS (learn from these — they almost passed):\n"
-        for np in best_near_passers[:8]:
+        near_passer_section = "\nNEAR-PASSERS — these almost worked, learn from them:\n"
+        for np in best_near_passers[:6]:
             near_passer_section += (
-                f"  Sharpe={np.get('sharpe', 0):.2f} Fitness={np.get('fitness', 0):.2f} "
+                f"  S={np.get('sharpe', 0):.2f} F={np.get('fitness', 0):.2f} "
                 f"Fail={np.get('reason', '?')} → {np.get('expression', '?')}\n"
             )
 
     failure_section = ""
     if recent_failures:
-        failure_section = "\nRECENT FAILURES (avoid these patterns):\n"
-        for f in recent_failures[:6]:
+        failure_section = "\nSYNTAX ERRORS — avoid these mistakes:\n"
+        for f in recent_failures[:4]:
             failure_section += (
-                f"  ERROR={f.get('error', '?')} → {f.get('expression', '?')[:80]}\n"
+                f"  {f.get('error', '?')} → {f.get('expression', '?')[:60]}\n"
             )
 
     underexplored_section = ""
     if underexplored_categories:
         underexplored_section = (
-            "\nUNDEREXPLORED DATA CATEGORIES (prioritize these for uncorrelated alphas):\n"
-            f"  {', '.join(underexplored_categories)}\n"
-            "\nHigh-value underexplored fields to try:\n"
-            "  - Put-call ratios: ts_backfill(pcr_oi_270, 60), ts_backfill(pcr_vol_10, 60)\n"
-            "  - IV skew: ts_backfill(implied_volatility_mean_skew_30, 60)\n"
-            "  - Earnings surprise: snt1_d1_earningssurprise, snt1_d1_netearningsrevision\n"
-            "  - News reaction: ts_backfill(news_pct_1min, 60), ts_backfill(rp_ess_earnings, 60)\n"
-            "  - Fundamental derivatives: cashflow_efficiency_rank_derivative, growth_potential_rank_derivative\n"
-            "  - Trend extraction: ts_regression(close, ts_step(1), 20, rettype=2)\n"
+            f"\nUNDEREXPLORED CATEGORIES — prioritize these: {', '.join(underexplored_categories)}\n"
         )
 
-    return f"""Generate {num_expressions} novel alpha expressions for the WorldQuant BRAIN simulator.
+    return f"""Generate {num_expressions} alpha expressions. Each must target a DIFFERENT market anomaly.
 
 {submitted_section}
 {near_passer_section}
 {failure_section}
 {underexplored_section}
 
-Requirements:
-- AT LEAST {max(2, num_expressions // 2)} expressions MUST be multi-factor combinations using the A + B pattern
-  (e.g., rank(fundamental_signal) + -rank(price_reversion_signal))
-  Each component MUST use a DIFFERENT data source (fundamental + price, options + returns, earnings + vwap, etc.)
-- Each expression must use DIFFERENT primary data fields from each other
-- At least 1 expression should use data from underexplored categories
-- Favor simple, robust expressions (1-3 function calls per component)
-- Include rank() in every expression
-- For options/news/sentiment data, ALWAYS use ts_backfill(field, 60)
-- For fscore_* fields, ALWAYS multiply by rank(cap) or rank(adv20)
-- Total submitted alphas: {recent_eligible_count} — we need MORE from DIVERSE data sources
+OVERUSED FIELDS — do NOT use these, they've been tried hundreds of times:
+  cashflow_efficiency_rank_derivative, growth_potential_rank_derivative, operating_income
 
-Output EXACTLY {num_expressions} expressions, one per line.
-Raw expression text only — no numbering, no explanation, no markdown."""
+Rules:
+- Each expression uses DIFFERENT primary data fields from every other expression
+- Each expression uses DIFFERENT data from the already-submitted list above
+- Prefer multiplicative combos: rank(A * B) or rank(A) * rank(B)
+- Keep it simple: 1-3 function calls max
+- Total portfolio: {recent_eligible_count} alphas. We need DIVERSE data sources.
+
+CRITICAL: Output EXACTLY {num_expressions} raw expressions, one per line.
+NO explanations, NO numbering, NO bullet points, NO markdown.
+Just {num_expressions} lines of pure FastExpression code."""
 
 
 # ── API clients ──────────────────────────────────────────────────────
@@ -608,11 +576,21 @@ def parse_expressions(raw_text: str) -> list[str]:
     Parse LLM output into individual expressions.
     Handles numbered lists, bullet points, and raw lines.
     """
+    valid, _ = parse_expressions_with_errors(raw_text)
+    return valid
+
+
+def parse_expressions_with_errors(raw_text: str) -> tuple[list[str], list[tuple[str, str]]]:
+    """
+    Parse LLM output, returning (valid_expressions, [(failed_expr, reason), ...]).
+    Used for self-correcting retry.
+    """
     if not raw_text:
-        return []
+        return [], []
 
     lines = raw_text.strip().split("\n")
     expressions = []
+    failures = []
 
     for line in lines:
         line = line.strip()
@@ -643,8 +621,10 @@ def parse_expressions(raw_text: str) -> list[str]:
         valid, reason = validate_expression(line)
         if valid:
             expressions.append(line)
+        else:
+            failures.append((line, reason))
 
-    return expressions
+    return expressions, failures
 
 
 # ── Main generator class ─────────────────────────────────────────────
@@ -742,9 +722,31 @@ class LLMAlphaGenerator:
             print("[LLM_GEN] API call failed — no expressions generated")
             return
 
-        expressions = parse_expressions(raw)
+        expressions, failures = parse_expressions_with_errors(raw)
         self._total_generated += len(expressions)
         self._total_valid += len(expressions)
+
+        # v6.1: Self-correcting retry — feed errors back to LLM for fixing
+        max_retries = getattr(_cfg, "LLM_AST_RETRY_MAX", 1)
+        if failures and len(expressions) < 3 and max_retries > 0:
+            retry_prompt = "These expressions had syntax errors. Fix each one and output ONLY the corrected expressions, one per line:\n\n"
+            for failed_expr, reason in failures[:4]:
+                retry_prompt += f"  ERROR: {reason}\n  EXPRESSION: {failed_expr}\n\n"
+            retry_prompt += "Output ONLY corrected expressions — no explanation, no numbering."
+
+            # Respect cooldown
+            time.sleep(max(2, cooldown - (time.time() - self._last_api_call_time)))
+            self._last_api_call_time = time.time()
+            self._total_api_calls += 1
+
+            retry_raw = self.client.generate(SYSTEM_PROMPT, retry_prompt)
+            if retry_raw:
+                fixed = parse_expressions(retry_raw)
+                if fixed:
+                    expressions.extend(fixed)
+                    self._total_generated += len(fixed)
+                    self._total_valid += len(fixed)
+                    print(f"[LLM_AST_RETRY] Fixed {len(fixed)}/{len(failures)} failed expressions")
 
         if expressions:
             self._cache.extend(expressions)

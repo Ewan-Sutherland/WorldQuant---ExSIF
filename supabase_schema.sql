@@ -343,3 +343,25 @@ BEGIN
     GROUP BY c.settings_json->>'truncation';
 END;
 $$ LANGUAGE plpgsql;
+
+-- v6.1: Review queue for manual submission decisions (merged performance mode)
+CREATE TABLE IF NOT EXISTS review_queue (
+    id SERIAL PRIMARY KEY,
+    candidate_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    expression TEXT NOT NULL,
+    core_signal TEXT,
+    family TEXT,
+    template_id TEXT,
+    sharpe REAL,
+    fitness REAL,
+    turnover REAL,
+    settings_json TEXT,
+    status TEXT DEFAULT 'pending',
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    reviewed_at TIMESTAMPTZ,
+    owner TEXT DEFAULT 'Ewan'
+);
+
+CREATE INDEX IF NOT EXISTS idx_review_queue_status ON review_queue(status);

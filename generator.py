@@ -224,6 +224,26 @@ class AlphaGenerator:
         template_id = row["template_id"]
         reason = str(row["reason"]) if "reason" in row.keys() else ""
 
+        # v6.1: Families not in TEMPLATE_LIBRARY (signal_combo, evolved, llm_*)
+        # can't be mutated via template — use settings-only refinement
+        if family not in TEMPLATE_LIBRARY:
+            original_expr = row["canonical_expression"]
+            settings = self._json_or_dict(row["settings_json"])
+            settings = self._mutate_settings(settings, mode="settings_sweep", family=family)
+            sim = SimulationSettings(**settings)
+            canon = canonicalize_expression(original_expr)
+            h = hash_candidate(canon, sim.to_dict())
+            return Candidate.create(
+                expression=original_expr,
+                canonical_expression=canon,
+                expression_hash=h,
+                template_id=template_id,
+                family=family,
+                fields=self._extract_fields(original_expr, {}),
+                params={},
+                settings=sim,
+            )
+
         template = next(
             (t for t in TEMPLATE_LIBRARY[family] if t["template_id"] == template_id),
             None,
@@ -404,6 +424,10 @@ class AlphaGenerator:
     def _refinement_mode(self, reason: str, metrics_hint: dict[str, Any] | None) -> str:
         txt = (reason or "").upper()
 
+        # v6.1: Eligible alpha optimization — always try different settings
+        if "ELIGIBLE_OPTIMIZE" in txt:
+            return "settings_sweep"
+
         if "CONCENTRATED_WEIGHT" in txt:
             return "concentrated_weight"
         if "LOW_SUB_UNIVERSE_SHARPE" in txt or "SUB_UNIVERSE" in txt:
@@ -563,9 +587,16 @@ class AlphaGenerator:
         if expr.count("rank(") >= 3 or expr.count("ts_mean(") >= 3 or expr.count("ts_decay_linear(") >= 2:
             return expr
 
-        # v5.9.1: Signal-aware smoothing (research: optimal decay varies by data type)
-        # Multiplicative combos and q-theory composites — already complex, reduce smoothing
-        if template_id and template_id.startswith("m7c_") and template_id in {"m7c_05", "m7c_06", "m7c_07", "m7c_08", "m7c_09", "m7c_10", "m7c_11", "m7c_12", "m7c_13", "m7c_14", "m7c_15"}:
+        # v5.9.1 + v6.1: Signal-aware smoothing — complex templates get light processing only
+        light_templates = {
+            "m7c_05", "m7c_06", "m7c_07", "m7c_08", "m7c_09", "m7c_10", "m7c_11",
+            "m7c_12", "m7c_13", "m7c_14", "m7c_15",
+            # v6.1: Raw multiplicative and group_rank templates — already complex
+            "m7c_16", "m7c_17", "m7c_18", "m7c_19", "m7c_20", "m7c_21", "m7c_22",
+            "m7c_23", "m7c_24", "m7c_25", "m7c_26",
+            "cf_11", "cf_12", "cf_13", "cf_14", "cf_15",
+        }
+        if template_id and template_id in light_templates:
             force_smoothing = False
             light = True  # Only light smoothing for complex expressions
 
@@ -608,8 +639,16 @@ class AlphaGenerator:
                     expr = f"ts_mean(rank({expr}), {win})"
             else:
                 win = self.rng.choice(smooth_windows)
-                if self.rng.random() < decay_prob:
+                roll = self.rng.random()
+                if roll < decay_prob:
                     expr = f"ts_decay_linear(rank({expr}), {win})"
+                elif roll < decay_prob + 0.08:
+                    # v6.1: rank(rank(X)) — double ranking, normalizes extreme distributions
+                    # Shows up in several near-passers from logs
+                    expr = f"rank(rank({expr}))"
+                elif roll < decay_prob + 0.13:
+                    # v6.1: winsorize — cap outliers, improves fitness (used in wp_04, our best proven template)
+                    expr = f"winsorize(rank({expr}), std=4)"
                 else:
                     expr = f"ts_mean(rank({expr}), {win})"
 

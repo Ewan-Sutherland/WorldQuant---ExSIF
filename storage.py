@@ -933,3 +933,34 @@ class Storage:
                 (limit,),
             ).fetchall()
         return [row["canonical_expression"] for row in rows]
+
+    def get_self_correlation_rejections(self, *, limit: int = 500) -> list[dict]:
+        """v6.1: Get candidates that were rejected by WQ for self-correlation."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT c.canonical_expression, c.candidate_id
+                FROM submissions s
+                JOIN candidates c ON s.candidate_id = c.candidate_id
+                WHERE s.submission_status = 'rejected'
+                  AND s.message LIKE '%SELF_CORRELATION%'
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [{"canonical_expression": row["canonical_expression"], "candidate_id": row["candidate_id"]} for row in rows]
+
+    def insert_review_queue(self, *, candidate_id, run_id, expression, core_signal,
+                            family, template_id, sharpe, fitness, turnover, settings_json):
+        """v6.1: Add eligible alpha to review queue for manual submission decision."""
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO review_queue
+                (candidate_id, run_id, expression, core_signal, family, template_id,
+                 sharpe, fitness, turnover, settings_json, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                """,
+                (candidate_id, run_id, expression, core_signal, family, template_id,
+                 sharpe, fitness, turnover, settings_json),
+            )

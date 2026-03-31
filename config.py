@@ -96,9 +96,9 @@ TEMPLATE_EXPLORATION_PROBABILITY = 0.10
 SOFT_PRUNE_REFINEMENT_PROBABILITY = 0.35
 
 # Submission behaviour
-# v5.9.1: AUTO_SUBMIT enabled — WQ self-correlation check is the authority.
-# Failed submissions don't count against daily cap (confirmed via API testing).
-AUTO_SUBMIT = True
+# v6.1: AUTO_SUBMIT OFF — past 10k individual points, now in merged performance mode.
+# Bot finds eligible alphas, user reviews "Before/After Submission" on BRAIN website.
+AUTO_SUBMIT = False
 
 # Submission diversity / self-correlation avoidance
 # Structural similarity threshold: if candidate > this vs any submitted alpha, flag as correlated
@@ -285,6 +285,23 @@ PREFERRED_TEMPLATE_BOOSTS.update({
     # v6.0: 3-signal composites
     "m7c_14": 1.20,      # KEEP: avg S=0.42, best F=0.84
     "m7c_15": 0.60,      # SOFT PRUNE: avg S=0.43, 12 sims, never close
+    # v6.1: RAW MULTIPLICATIVE rank(A * B) — research says this form outperforms
+    "m7c_16": 2.50,      # model77 × price reversion — highest priority new form
+    "m7c_17": 2.50,      # model77 × vwap intraday
+    "m7c_18": 2.50,      # model77 × vwap reversion smoothed
+    "m7c_19": 2.00,      # model77 × IV skew — cross-dataset interaction
+    "m7c_20": 2.00,      # model77 × earnings revision
+    "m7c_21": 2.20,      # multiplicative pair + additive third (GP/A)
+    "m7c_22": 2.20,      # multiplicative pair + additive third (investment)
+    "m7c_23": 2.50,      # group_rank of model77 × reversion — industry relative
+    "m7c_24": 2.50,      # group_rank of model77 × vwap — subindustry relative
+    "m7c_25": 2.30,      # ts_rank temporal × reversion — best for quarterly data
+    "m7c_26": 2.30,      # group_rank of ts_rank temporal × reversion
+    "cf_11": 2.50,       # fundamental/cap × price reversion raw mult
+    "cf_12": 2.50,       # fundamental zscore × vwap raw mult
+    "cf_13": 2.50,       # fundamental/cap × vwap reversion raw mult
+    "cf_14": 2.50,       # group_rank fundamental × reversion — industry
+    "cf_15": 2.50,       # group_rank fundamental × reversion — subindustry
     # v6.0: Relationship — decayed customer momentum underwhelming
     "rel_09": 0.80,      # KEEP LOW: avg S=0.60 in 2 sims — needs more data
     "rel_10": 0.01,      # DEAD: avg S=-1.09 — wrong sign!
@@ -312,9 +329,14 @@ FRESH_RAW_RANK_PROB = 0.02
 PREFER_TS_MEAN_WINDOW = [3, 5, 10]
 
 # v5.6: LLM generation
-# Probability of trying LLM generation instead of templates for fresh candidates
-# v5.8: Reduced from 0.20 — template combos are higher value than LLM single-signals
-LLM_GENERATION_PROBABILITY = 0.10
+# v6.1: Bumped from 0.10 — hypothesis-first prompting should produce better expressions
+LLM_GENERATION_PROBABILITY = 0.25
+
+# v6.1: Signal combination — auto-combine near-passers from different data categories
+COMBO_GENERATION_PROBABILITY = 0.10
+
+# v6.1: Evolutionary mutation — LLM mutates top performers
+EVOLVE_GENERATION_PROBABILITY = 0.10
 
 # ── v5.7: Signal-class settings profiles ─────────────────────────────
 # Each signal class has preferred settings based on WQ researcher recommendations.
@@ -350,4 +372,5 @@ SIGNAL_CLASS_SETTINGS = {
 MIN_EXPLORATION_PER_FAMILY = 25
 
 # v5.9: LLM rate limit cooldown (seconds between calls)
-LLM_COOLDOWN_SECONDS = 30
+LLM_COOLDOWN_SECONDS = 8  # v6.1: Tier 1 billing enabled — 2000 RPM, 10000 RPD
+LLM_AST_RETRY_MAX = 1      # v6.1: retry failed expressions once with error feedback

@@ -52,6 +52,8 @@ class AlphaBot:
         # v6.0.1: Core signals that already passed — track COUNT, allow up to N variants
         # WQ self-correlation accepts different post-processing of same core (e.g. ts_rank vs ts_mean)
         self.passed_cores: dict[str, int] = {}  # core_signal → number of times passed
+        # v6.1: Cores that WQ has rejected for self-correlation — skip submission, not simulation
+        self.rejected_cores: set[str] = set()
         # v6.0: Track refinement attempts per CORE SIGNAL to prevent same expression via different candidates
         self.refinement_attempts_by_core: dict[str, int] = {}
         # v6.0: Track recently simulated LLM expressions to prevent duplicates
@@ -72,6 +74,26 @@ class AlphaBot:
             print("[LLM] LLM generator available — will mix LLM candidates with templates")
         else:
             print("[LLM] No API keys found (GEMINI_API_KEY / GROQ_API_KEY) — template-only mode")
+
+        # v6.1: Signal combination engine — auto-combines near-passers
+        try:
+            from signal_combiner import SignalCombiner
+            self.signal_combiner = SignalCombiner(storage)
+            self.signal_combiner.refresh_near_passers()
+            self._combo_refresh_interval = 50  # refresh every 50 sims
+        except Exception as exc:
+            self.signal_combiner = None
+            print(f"[COMBINER] Not available: {exc}")
+
+        # v6.1: Evolutionary LLM mutation — evolves top performers
+        try:
+            from alpha_evolver import AlphaEvolver
+            self.evolver = AlphaEvolver(self.llm_generator, storage)
+            self.evolver.refresh_population()
+            self._evolver_refresh_interval = 50
+        except Exception as exc:
+            self.evolver = None
+            print(f"[EVOLVER] Not available: {exc}")
 
         # v6.0.1: Warm-start session state from database — persists across restarts & team members
         self._warm_start_from_history()
@@ -118,6 +140,18 @@ class AlphaBot:
                 )
         except Exception as exc:
             print(f"[WARM_START] Failed to load CW blacklist: {exc}")
+
+        # 3. Load cores rejected by WQ for self-correlation — skip future submissions
+        try:
+            rejected_rows = self.storage.get_self_correlation_rejections(limit=500)
+            for row in rejected_rows:
+                core = self._extract_core_signal(row.get("canonical_expression", ""))
+                if core:
+                    self.rejected_cores.add(core)
+            if self.rejected_cores:
+                print(f"[WARM_START] Loaded {len(self.rejected_cores)} self-corr rejected cores")
+        except Exception as exc:
+            print(f"[WARM_START] Failed to load rejected cores: {exc}")
 
     # =========================================================
     # Main loop
@@ -322,7 +356,58 @@ class AlphaBot:
                 )
 
             if config.AUTO_SUBMIT:
-                self._attempt_submission(candidate_id, run_id, result)
+                # v6.1: Skip submission if this core was already rejected by WQ
+                skip_core = None
+                if candidate_row:
+                    core = self._extract_core_signal(candidate_row.get("canonical_expression", ""))
+                    if core and core in self.rejected_cores:
+                        skip_core = core
+
+                if skip_core:
+                    self.storage.insert_submission(
+                        submission_id=new_id("sub"),
+                        candidate_id=candidate_id,
+                        run_id=run_id,
+                        submitted_at=utc_now(),
+                        submission_status="skipped_self_corr",
+                        message=f"skipped: core already rejected by WQ — '{skip_core[:60]}'",
+                    )
+                    print(
+                        f"[SUBMIT_SKIP_CORR] run_id={run_id} "
+                        f"core='{skip_core[:60]}' — already rejected by WQ, skipping API call"
+                    )
+                else:
+                    self._attempt_submission(candidate_id, run_id, result)
+            else:
+                # v6.1: AUTO_SUBMIT off — add to review queue for manual decision
+                core = None
+                if candidate_row:
+                    core = self._extract_core_signal(candidate_row.get("canonical_expression", ""))
+                    # Skip adding to review queue if core already rejected
+                    if core and core in self.rejected_cores:
+                        print(
+                            f"[REVIEW_SKIP_CORR] run_id={run_id} "
+                            f"core='{core[:60]}' — already rejected, not adding to review queue"
+                        )
+                    else:
+                        import json as _json
+                        self.storage.insert_review_queue(
+                            candidate_id=candidate_id,
+                            run_id=run_id,
+                            expression=candidate_row.get("canonical_expression", ""),
+                            core_signal=core or "",
+                            family=candidate_row.get("family", ""),
+                            template_id=candidate_row.get("template_id", ""),
+                            sharpe=metrics.sharpe,
+                            fitness=metrics.fitness,
+                            turnover=metrics.turnover,
+                            settings_json=candidate_row.get("settings_json", "{}"),
+                        )
+                        print(
+                            f"[REVIEW_QUEUED] run_id={run_id} S={metrics.sharpe:.2f} F={metrics.fitness:.2f} "
+                            f"family={candidate_row.get('family','')} core='{(core or '')[:60]}' "
+                            f"— check Before/After on BRAIN website"
+                        )
 
         if self.completed_runs % config.REPORT_EVERY_N_COMPLETIONS == 0:
             self._print_progress_report()
@@ -335,8 +420,21 @@ class AlphaBot:
         if sharpe is None or fitness is None:
             return
 
-        # Don't refine alphas that already pass — that wastes sim slots
+        # v6.1: Eligible alphas get settings-only refinement to find optimal version
+        # for merged performance (lower turnover, higher Sharpe, better drawdown ratio)
         if metrics.submit_eligible:
+            priority = sharpe + fitness
+            self.storage.queue_refinement(
+                candidate_id=candidate_id,
+                run_id=run_id,
+                priority=priority,
+                reason="eligible_optimize",
+                stage="optimize",
+            )
+            print(
+                f"[QUEUED_OPTIMIZE] run_id={run_id} candidate_id={candidate_id} "
+                f"S={sharpe:.2f} F={fitness:.2f} — refining settings for merged performance"
+            )
             return
 
         min_refinement_sharpe = getattr(config, "MIN_REFINEMENT_SHARPE", 1.20)
@@ -452,6 +550,17 @@ class AlphaBot:
                     f"reason={fail_reason} self_corr={self_corr} "
                     f"correlated_with={corr_with} ❌ NOT ACCEPTED"
                 )
+                # v6.1: Track rejected cores to skip future submissions of same core
+                if fail_reason and "SELF_CORRELATION" in str(fail_reason).upper():
+                    cand_row = self.storage.get_candidate_by_id(candidate_id)
+                    if cand_row:
+                        rej_core = self._extract_core_signal(cand_row.get("canonical_expression", ""))
+                        if rej_core and rej_core not in self.rejected_cores:
+                            self.rejected_cores.add(rej_core)
+                            print(
+                                f"[CORE_REJECTED] core='{rej_core[:60]}' "
+                                f"self_corr={self_corr} — future variants will skip submission"
+                            )
             else:
                 # Timeout or unknown
                 self.storage.insert_submission(
@@ -788,39 +897,62 @@ class AlphaBot:
         return max(0.15, min(3.00, score))
 
     def _family_bias_map(self) -> dict[str, float]:
+        """
+        v6.1: Thompson Sampling for family selection.
+        
+        Instead of deterministic weights, sample from each family's posterior
+        distribution. Families with high mean sharpe usually win, but
+        under-explored families have high variance and sometimes sample
+        very high — driving automatic exploration.
+        
+        Prior: N(0.5, 1.0) for unknown families
+        Posterior: N(mean_sharpe, 1.0/sqrt(n)) 
+        """
+        import random as _rng
+        
         stats = self._family_stats_map()
         bias: dict[str, float] = {}
         min_explore = getattr(config, "MIN_EXPLORATION_PER_FAMILY", 25)
 
-        for family in config.DEFAULT_FAMILY_ORDER if hasattr(config, "DEFAULT_FAMILY_ORDER") else []:
-            if family not in stats:
-                # v5.7: Unseen family — force high exploration weight
-                bias[family] = 3.0
-            else:
-                bias[family] = 1.0
-
-        for family, row in stats.items():
-            n_runs = row.get("n_runs", 0)
-
-            if n_runs < min_explore:
-                # v5.7: Under minimum exploration — force high weight
-                # This prevents adaptive weighting from starving new signal classes
-                bias[family] = 3.0
-            else:
-                bias[family] = self._score_from_stats(
-                    avg_sharpe=row["avg_sharpe"],
-                    avg_fitness=row["avg_fitness"],
-                    avg_turnover=row["avg_turnover"],
-                    n_runs=row["n_runs"],
-                )
-
-        # Submission diversity: boost families NOT yet represented in submissions
+        # Submission diversity: get families already in portfolio
         submitted_families = self._get_submitted_family_set()
-        if submitted_families:
-            diversity_boost = getattr(config, "UNSUBMITTED_FAMILY_BOOST", 1.60)
-            for family in bias:
-                if family not in submitted_families and family not in {"momentum", "fundamental"}:
-                    bias[family] *= diversity_boost
+        diversity_boost = getattr(config, "UNSUBMITTED_FAMILY_BOOST", 1.60)
+
+        all_families = set()
+        if hasattr(config, "DEFAULT_FAMILY_ORDER"):
+            all_families.update(config.DEFAULT_FAMILY_ORDER)
+        all_families.update(stats.keys())
+
+        for family in all_families:
+            if family not in stats:
+                # Unknown family — sample from wide prior N(0.5, 1.0)
+                sampled = _rng.gauss(0.5, 1.0)
+            else:
+                row = stats[family]
+                n_runs = row.get("n_runs", 0) or 0
+                avg_sharpe = float(row.get("avg_sharpe", 0) or 0)
+
+                if n_runs < 3:
+                    # Too few observations — wide prior
+                    sampled = _rng.gauss(0.5, 0.8)
+                else:
+                    # Posterior: N(mean_sharpe, exploration_std / sqrt(n))
+                    exploration_std = 1.0
+                    posterior_std = exploration_std / (n_runs ** 0.5)
+                    # Floor to ensure some exploration even for well-known families
+                    posterior_std = max(posterior_std, 0.05)
+                    sampled = _rng.gauss(avg_sharpe, posterior_std)
+
+            # Convert sampled value to weight (must be positive)
+            # Shift so that sharpe=0 → weight≈1.0, sharpe=1.5 → weight≈3.0
+            weight = max(0.15, 1.0 + sampled)
+
+            # Boost families not yet in submission portfolio
+            if submitted_families and family not in submitted_families:
+                if family not in {"momentum", "fundamental"}:
+                    weight *= diversity_boost
+
+            bias[family] = weight
 
         return bias
 
@@ -1048,6 +1180,40 @@ class AlphaBot:
         template_bias = self._template_bias_map()
         settings_bias = self._settings_bias_map()
 
+        # v6.1: Periodically refresh signal combiner and evolver data
+        if (
+            self.signal_combiner is not None
+            and self.completed_runs > 0
+            and self.completed_runs % self._combo_refresh_interval == 0
+        ):
+            self.signal_combiner.refresh_near_passers()
+        if (
+            self.evolver is not None
+            and self.completed_runs > 0
+            and self.completed_runs % self._evolver_refresh_interval == 0
+        ):
+            self.evolver.refresh_population()
+
+        # v6.1: Try signal combination some of the time (10%)
+        combo_prob = getattr(config, "COMBO_GENERATION_PROBABILITY", 0.10)
+        if (
+            self.signal_combiner is not None
+            and self.generator.rng.random() < combo_prob
+        ):
+            candidate = self._combo_candidate(settings_bias)
+            if candidate is not None:
+                return candidate
+
+        # v6.1: Try evolutionary mutation some of the time (10%)
+        evolve_prob = getattr(config, "EVOLVE_GENERATION_PROBABILITY", 0.10)
+        if (
+            self.evolver is not None
+            and self.generator.rng.random() < evolve_prob
+        ):
+            candidate = self._evolve_candidate(settings_bias)
+            if candidate is not None:
+                return candidate
+
         # v5.6: Try LLM generation some of the time
         llm_prob = getattr(config, "LLM_GENERATION_PROBABILITY", 0.35)
         if (
@@ -1174,6 +1340,79 @@ class AlphaBot:
         print(
             f"[LLM_CANDIDATE] family={candidate.family} template={candidate.template_id} "
             f"expr={candidate.expression}"
+        )
+        return candidate
+
+    def _combo_candidate(self, settings_bias=None):
+        """
+        v6.1: Generate a candidate by combining near-passers from different data categories.
+        Three uncorrelated S=1.0 signals combine to S≈1.46.
+        """
+        n_signals = 3 if self.generator.rng.random() < 0.30 else 2
+
+        expr = self.signal_combiner.generate_combo(n_signals=n_signals)
+        if expr is None:
+            return None
+
+        try:
+            candidate = self.generator.create_from_expression(expr, settings_bias=settings_bias)
+        except Exception as exc:
+            print(f"[COMBO_CANDIDATE_ERROR] expr={expr[:80]} error={exc}")
+            return None
+
+        # Dedup check
+        if self.storage.candidate_exists(candidate.expression_hash):
+            print(f"[COMBO_DUP] expr={expr[:80]}")
+            return None
+
+        # CW blacklist check
+        if candidate.canonical_expression in self.concentrated_weight_exprs:
+            print(f"[COMBO_CW_BLOCKED] expr={expr[:80]}")
+            return None
+
+        # Override family/template for tracking
+        candidate.family = "signal_combo"
+        candidate.template_id = f"combo_{n_signals}s"
+
+        print(
+            f"[COMBO_CANDIDATE] n_signals={n_signals} family={candidate.family} "
+            f"template={candidate.template_id} expr={candidate.expression}"
+        )
+        return candidate
+
+    def _evolve_candidate(self, settings_bias=None):
+        """
+        v6.1: Generate a candidate by mutating a top-performing expression.
+        FunSearch-inspired: LLM makes targeted modifications to near-passers.
+        """
+        submitted_rows = self.storage.get_submitted_candidate_rows(limit=50)
+        submitted_exprs = [r["canonical_expression"] for r in submitted_rows]
+
+        expr = self.evolver.evolve(submitted_exprs=submitted_exprs)
+        if expr is None:
+            return None
+
+        try:
+            candidate = self.generator.create_from_expression(expr, settings_bias=settings_bias)
+        except Exception as exc:
+            print(f"[EVOLVE_CANDIDATE_ERROR] expr={expr[:80]} error={exc}")
+            return None
+
+        if self.storage.candidate_exists(candidate.expression_hash):
+            print(f"[EVOLVE_DUP] expr={expr[:80]}")
+            return None
+
+        if candidate.canonical_expression in self.concentrated_weight_exprs:
+            print(f"[EVOLVE_CW_BLOCKED] expr={expr[:80]}")
+            return None
+
+        # Track as evolved
+        candidate.family = "evolved"
+        candidate.template_id = "evolve_mut"
+
+        print(
+            f"[EVOLVE_CANDIDATE] family={candidate.family} "
+            f"template={candidate.template_id} expr={candidate.expression}"
         )
         return candidate
 
