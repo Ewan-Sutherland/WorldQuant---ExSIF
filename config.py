@@ -372,5 +372,5 @@ SIGNAL_CLASS_SETTINGS = {
 MIN_EXPLORATION_PER_FAMILY = 25
 
 # v5.9: LLM rate limit cooldown (seconds between calls)
-LLM_COOLDOWN_SECONDS = 8  # v6.1: Tier 1 billing enabled — 2000 RPM, 10000 RPD
+LLM_COOLDOWN_SECONDS = 60  # v6.1: Free tier — 10 RPM, 250 RPD. Groq fallback handles overflow
 LLM_AST_RETRY_MAX = 1      # v6.1: retry failed expressions once with error feedback
