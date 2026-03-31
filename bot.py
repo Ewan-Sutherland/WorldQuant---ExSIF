@@ -424,12 +424,16 @@ class AlphaBot:
         # for merged performance (lower turnover, higher Sharpe, better drawdown ratio)
         if metrics.submit_eligible:
             priority = sharpe + fitness
-            self.storage.queue_refinement(
+            self.storage.add_refinement_candidate(
                 candidate_id=candidate_id,
                 run_id=run_id,
                 priority=priority,
                 reason="eligible_optimize",
-                stage="optimize",
+                created_at=utc_now(),
+                source_stage="optimize",
+                base_sharpe=sharpe,
+                base_fitness=fitness,
+                base_turnover=turnover,
             )
             print(
                 f"[QUEUED_OPTIMIZE] run_id={run_id} candidate_id={candidate_id} "
