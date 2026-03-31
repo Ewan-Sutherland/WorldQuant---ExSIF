@@ -52,9 +52,13 @@ def main():
 
     perf = client.check_before_after_performance(alpha_id, competition_id=comp_id)
     print(f"\nResult:")
-    print(f"  before_score: {perf['_before_score']}")
-    print(f"  after_score: {perf['_after_score']}")
-    print(f"  change: {perf['_change']}")
+    print(f"  before_sharpe: {perf['_before_sharpe']}")
+    print(f"  after_sharpe: {perf['_after_sharpe']}")
+    print(f"  sharpe_change: {perf['_sharpe_change']}")
+    print(f"  before_fitness: {perf['_before_fitness']}")
+    print(f"  after_fitness: {perf['_after_fitness']}")
+    print(f"  before_pnl: {perf['_before_pnl']}")
+    print(f"  after_pnl: {perf['_after_pnl']}")
     print(f"  error: {perf['_error']}")
     if "_raw" in perf and perf["_raw"]:
         print(f"  raw response: {json.dumps(perf['_raw'], indent=2)[:500]}")
@@ -62,6 +66,9 @@ def main():
     print(f"\n{'='*60}")
     if result["_passed"] is not None and perf["_error"] is None:
         print("✅ Both endpoints working! Safe to run overnight.")
+        if perf["_sharpe_change"] is not None:
+            direction = "📈" if perf["_sharpe_change"] > 0 else "📉"
+            print(f"   {direction} This alpha would change merged Sharpe by {perf['_sharpe_change']:+.4f}")
     else:
         print("⚠️ Check the output above for issues before running overnight.")
     print(f"{'='*60}")

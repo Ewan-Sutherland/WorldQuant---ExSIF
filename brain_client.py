@@ -494,9 +494,18 @@ class BrainClient:
 
         if response.status_code not in (200, 201, 202):
             return {
-                "_before_score": None,
-                "_after_score": None,
-                "_change": None,
+                "_before_sharpe": None,
+                "_after_sharpe": None,
+                "_sharpe_change": None,
+                "_before_fitness": None,
+                "_after_fitness": None,
+                "_before_pnl": None,
+                "_after_pnl": None,
+                "_before_returns": None,
+                "_after_returns": None,
+                "_before_drawdown": None,
+                "_after_drawdown": None,
+                "_raw": None,
                 "_error": f"request failed: {response.status_code} {response.text[:200]}",
             }
 
@@ -520,24 +529,54 @@ class BrainClient:
                 except ValueError:
                     continue
 
-                before = data.get("before")
-                after = data.get("after")
-                change = None
-                if before is not None and after is not None:
-                    change = after - before
+                # Response format: {"partitionName": "EQUITY:1", "stats": {"before": {...}, "after": {...}}}
+                stats = data.get("stats", {})
+                before_stats = stats.get("before", {})
+                after_stats = stats.get("after", {})
+
+                if not before_stats or not after_stats:
+                    # Not the final response yet
+                    if not stats:
+                        continue
+
+                before_sharpe = before_stats.get("sharpe")
+                after_sharpe = after_stats.get("sharpe")
+                before_fitness = before_stats.get("fitness")
+                after_fitness = after_stats.get("fitness")
+
+                sharpe_change = None
+                if before_sharpe is not None and after_sharpe is not None:
+                    sharpe_change = round(after_sharpe - before_sharpe, 4)
 
                 return {
-                    "_before_score": before,
-                    "_after_score": after,
-                    "_change": change,
+                    "_before_sharpe": before_sharpe,
+                    "_after_sharpe": after_sharpe,
+                    "_sharpe_change": sharpe_change,
+                    "_before_fitness": before_fitness,
+                    "_after_fitness": after_fitness,
+                    "_before_pnl": before_stats.get("pnl"),
+                    "_after_pnl": after_stats.get("pnl"),
+                    "_before_returns": before_stats.get("returns"),
+                    "_after_returns": after_stats.get("returns"),
+                    "_before_drawdown": before_stats.get("drawdown"),
+                    "_after_drawdown": after_stats.get("drawdown"),
                     "_raw": data,
                     "_error": None,
                 }
 
         return {
-            "_before_score": None,
-            "_after_score": None,
-            "_change": None,
+            "_before_sharpe": None,
+            "_after_sharpe": None,
+            "_sharpe_change": None,
+            "_before_fitness": None,
+            "_after_fitness": None,
+            "_before_pnl": None,
+            "_after_pnl": None,
+            "_before_returns": None,
+            "_after_returns": None,
+            "_before_drawdown": None,
+            "_after_drawdown": None,
+            "_raw": None,
             "_error": "polling_timeout",
         }
 

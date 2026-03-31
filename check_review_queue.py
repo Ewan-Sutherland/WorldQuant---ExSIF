@@ -93,10 +93,10 @@ def main():
             if perf["_error"]:
                 print(f"         ⚠️  Performance check failed: {perf['_error']}")
                 perf_note = "perf_check_failed"
-            elif perf["_change"] is not None:
-                direction = "📈" if perf["_change"] > 0 else "📉" if perf["_change"] < 0 else "➡️"
-                print(f"         {direction} Score: {perf['_before_score']} → {perf['_after_score']} (change: {perf['_change']:+.0f})")
-                perf_note = f"before={perf['_before_score']} after={perf['_after_score']} change={perf['_change']:+.0f}"
+            elif perf["_sharpe_change"] is not None:
+                direction = "📈" if perf["_sharpe_change"] > 0 else "📉" if perf["_sharpe_change"] < 0 else "➡️"
+                print(f"         {direction} Merged Sharpe: {perf['_before_sharpe']:.2f} → {perf['_after_sharpe']:.2f} (change: {perf['_sharpe_change']:+.4f})")
+                perf_note = f"sharpe_before={perf['_before_sharpe']:.2f} sharpe_after={perf['_after_sharpe']:.2f} change={perf['_sharpe_change']:+.4f}"
             else:
                 perf_note = "perf_data_unavailable"
 
