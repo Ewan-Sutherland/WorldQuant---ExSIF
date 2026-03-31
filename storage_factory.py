@@ -15,6 +15,7 @@ def get_storage():
         return Storage(
             supabase_url=config.SUPABASE_URL,
             supabase_key=config.SUPABASE_ANON_KEY,
+            owner=config.BRAIN_USERNAME,
         )
     else:
         from storage import Storage

@@ -533,16 +533,6 @@ class BrainClient:
             )
 
         alpha_data = self._parse_json(response)
-
-        # v6.1 DEBUG: Log full API response to check for merged performance metrics
-        import json
-        full_dump = json.dumps(alpha_data, indent=2)
-        print(f"[DEBUG_ALPHA_RESPONSE] length={len(full_dump)} keys={list(alpha_data.keys())}")
-        # Print keys that might contain competition/merged data
-        for key in alpha_data:
-            if any(k in key.lower() for k in ['comp', 'iqc', 'merg', 'team', 'perf', 'score']):
-                print(f"[DEBUG_COMPETITION_KEY] {key}={json.dumps(alpha_data[key])[:500]}")
-
         return alpha_data
 
     def _extract_metrics_from_alpha(self, alpha_data: dict[str, Any]) -> dict[str, Any]:

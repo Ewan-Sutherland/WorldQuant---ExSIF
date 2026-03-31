@@ -31,15 +31,17 @@ def dt_to_str(value: Optional[datetime]) -> Optional[str]:
 class Storage:
     """Supabase-backed storage with the same interface as the SQLite version."""
 
-    def __init__(self, db_path: str | None = None, supabase_url: str | None = None, supabase_key: str | None = None):
+    def __init__(self, db_path: str | None = None, supabase_url: str | None = None, supabase_key: str | None = None, owner: str | None = None):
         """
         Args:
             db_path: Ignored (kept for backward compatibility with config.DB_PATH).
             supabase_url: Supabase project URL. Falls back to SUPABASE_URL env var.
             supabase_key: Supabase anon/publishable key. Falls back to SUPABASE_ANON_KEY env var.
+            owner: Username tag for all inserts (e.g. BRAIN_USERNAME).
         """
         self.url = (supabase_url or os.environ.get("SUPABASE_URL", "")).rstrip("/")
         self.key = supabase_key or os.environ.get("SUPABASE_ANON_KEY", "")
+        self.owner = owner or os.environ.get("BRAIN_USERNAME", "unknown")
         if not self.url or not self.key:
             raise ValueError("SUPABASE_URL and SUPABASE_ANON_KEY must be set")
         self.base = f"{self.url}/rest/v1"
@@ -135,6 +137,7 @@ class Storage:
             "params_json": candidate.params,
             "settings_json": candidate.settings.to_dict(),
             "created_at": dt_to_str(candidate.created_at),
+            "owner": self.owner,
         })
 
     def get_candidate_by_id(self, candidate_id: str) -> Optional[dict]:
@@ -164,6 +167,7 @@ class Storage:
             "completed_at": dt_to_str(run.completed_at),
             "error_message": run.error_message,
             "raw_result_json": run.raw_result,
+            "owner": self.owner,
         })
 
     def update_run(
@@ -242,6 +246,7 @@ class Storage:
             "submitted_at": dt_to_str(submitted_at),
             "submission_status": submission_status,
             "message": message,
+            "owner": self.owner,
         })
 
     # ── Refinement Queue ──────────────────────────────────────────────
@@ -609,6 +614,7 @@ class Storage:
             "turnover": turnover,
             "settings_json": settings_json,
             "status": "pending",
+            "owner": self.owner,
         })
 
 
