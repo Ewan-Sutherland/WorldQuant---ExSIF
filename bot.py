@@ -337,6 +337,13 @@ class AlphaBot:
         if sharpe is None or fitness is None:
             return
 
+        # v6.2: Don't queue refinement for cores already rejected by WQ self-correlation
+        candidate_row_check = self.storage.get_candidate_by_id(candidate_id)
+        if candidate_row_check:
+            core = self._extract_core_signal(candidate_row_check.get("canonical_expression", ""))
+            if core and core in self.rejected_cores:
+                return
+
         # v6.1: Eligible alphas get settings-only refinement to find optimal version
         # for merged performance (lower turnover, higher Sharpe, better drawdown ratio)
         if metrics.submit_eligible:
@@ -562,7 +569,21 @@ class AlphaBot:
             f"  Checking self-correlation..."
         )
 
-        check = self.client.check_alpha(alpha_id)
+        check = None
+        for attempt in range(3):
+            try:
+                check = self.client.check_alpha(alpha_id)
+                break
+            except Exception as exc:
+                if attempt < 2:
+                    print(f"  ⚠️ Check timed out (attempt {attempt+1}/3), retrying...")
+                    import time; time.sleep(5)
+                else:
+                    print(f"[OPTIMIZE_TIMEOUT] Check failed after 3 attempts: {exc}\n{'='*60}\n")
+                    return
+
+        if check is None:
+            return
 
         if check["_passed"] is False:
             if core:
@@ -598,7 +619,7 @@ class AlphaBot:
 
         n_variants = getattr(config, "OPTIMIZE_VARIANTS", 5)
 
-        if _HAS_OPTUNA and self.optimizer:
+        if _HAS_OPTUNA and self.settings_optimizer:
             print(f"  Generating {n_variants} Optuna settings variants...")
 
             base_settings_raw = candidate_row.get("settings_json", "{}")
@@ -617,7 +638,7 @@ class AlphaBot:
                 if generated >= n_variants:
                     break
 
-                suggestion = self.optimizer.suggest(
+                suggestion = self.settings_optimizer.suggest(
                     expression=expression,
                     core_signal=core or "",
                     family=family,
@@ -685,7 +706,11 @@ class AlphaBot:
                 )
 
                 # Check self-correlation for variant
-                v_check = self.client.check_alpha(v_alpha_id)
+                try:
+                    v_check = self.client.check_alpha(v_alpha_id)
+                except Exception as exc:
+                    print(f"    ⚠️ Self-corr check timed out: {exc}")
+                    continue
                 if v_check["_passed"] is not True:
                     print(f"    ❌ Self-corr failed (corr={v_check['_self_correlation']})")
                     continue
@@ -708,9 +733,13 @@ class AlphaBot:
         print(f"\n  Checking merged performance for {len(variants)} viable variant(s)...")
 
         for v in variants:
-            perf = self.client.check_before_after_performance(
-                v["alpha_id"], competition_id=config.IQC_COMPETITION_ID,
-            )
+            try:
+                perf = self.client.check_before_after_performance(
+                    v["alpha_id"], competition_id=config.IQC_COMPETITION_ID,
+                )
+            except Exception as exc:
+                print(f"  ⚠️ Before-after timed out for {v['desc']}: {exc}")
+                perf = {"_score_change": None, "_score_before": None, "_score_after": None}
             v["change"] = perf.get("_score_change")
             v["before"] = perf.get("_score_before")
             v["after"] = perf.get("_score_after")
@@ -1694,6 +1723,12 @@ class AlphaBot:
                 if core and self.refinement_attempts_by_core.get(core, 0) >= max_core_refine:
                     self.storage.mark_refinement_consumed(base_candidate_id)
                     print(f"[CORE_REFINE_CAP] core='{core[:60]}' attempts={self.refinement_attempts_by_core[core]} — skipping")
+                    continue
+
+                # v6.2: Skip if core already rejected by WQ self-correlation
+                if core and core in self.rejected_cores:
+                    self.storage.mark_refinement_consumed(base_candidate_id)
+                    print(f"[REFINE_SKIP_CORR] core='{core[:60]}' — already rejected by WQ, skipping refinement")
                     continue
 
                 if self._should_abandon_refinement_base(base_candidate_id):
