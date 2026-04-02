@@ -72,7 +72,7 @@ class SettingsOptimizer:
         trial = study.ask()
         settings = self._trial_to_settings(trial)
 
-        # Check if this exact combo was already tried
+        # v6.2: Robust dedup — collect all historical combos, retry up to 10 times
         tried_combos = set()
         for t in study.trials:
             if t.state == optuna.trial.TrialState.COMPLETE:
@@ -91,11 +91,24 @@ class SettingsOptimizer:
             settings["truncation"],
         )
 
-        if suggested_combo in tried_combos:
-            # Already tried this exact combo — try a second suggestion
+        # If duplicate, keep asking (up to 10 retries) before giving up
+        max_dedup_retries = 10
+        retries = 0
+        while suggested_combo in tried_combos and retries < max_dedup_retries:
             study.tell(trial, 0.0)  # Report dummy value
-            trial2 = study.ask()
-            settings = self._trial_to_settings(trial2)
+            trial = study.ask()
+            settings = self._trial_to_settings(trial)
+            suggested_combo = (
+                settings["universe"],
+                settings["neutralization"],
+                settings["decay"],
+                settings["truncation"],
+            )
+            retries += 1
+
+        if suggested_combo in tried_combos:
+            # Exhausted search space — no novel suggestions left
+            return None
 
         print(
             f"[OPTUNA] Suggested settings (warm={n_warm}): "

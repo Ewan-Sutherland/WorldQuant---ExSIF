@@ -35,6 +35,9 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "fv_05", "expression": "ts_rank({deep_field} / cap, 252)"},
         {"template_id": "fv_06", "expression": "group_rank(ts_rank({deep_field} / cap, 252), subindustry)"},
         {"template_id": "fv_07", "expression": "rank({deep_field} / enterprise_value)"},
+        # v6.2.1: Multi-period — short+long agreement as a signal (structurally different)
+        {"template_id": "fv_08", "expression": "rank(ts_rank({deep_field} / cap, 22)) * rank(ts_rank({deep_field} / cap, 252))"},
+        {"template_id": "fv_09", "expression": "rank(ts_rank({deep_field} / cap, 60)) * rank(ts_rank({deep_field} / cap, 252))"},
     ],
     "size_value": [
         {"template_id": "sv_01", "expression": "rank(ts_zscore(eps / close, {n}))"},
@@ -80,6 +83,17 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "opt_07", "expression": "rank(-ts_backfill(pcr_oi_{pcr_window}, 60)) * rank(adv20)"},
         {"template_id": "opt_08", "expression": "rank(ts_backfill(implied_volatility_mean_skew_{opt_window}, 60)) * rank(cap)"},
         {"template_id": "opt_09", "expression": "trade_when(ts_backfill(pcr_oi_270, 60) < 1, ts_backfill(implied_volatility_call_270, 60) - ts_backfill(implied_volatility_put_270, 60), -1)"},
+        # v6.2.1: PROVEN PORTFOLIO-ADDITIVE — IV/realized ratio (all 4 overnight winners used this)
+        {"template_id": "opt_10", "expression": "rank(ts_backfill(implied_volatility_call_120, 60) / (ts_backfill(parkinson_volatility_120, 60) + 0.001))"},
+        {"template_id": "opt_11", "expression": "group_rank(ts_backfill(implied_volatility_call_120, 60) / (ts_backfill(parkinson_volatility_120, 60) + 0.001), industry)"},
+        # v6.2.1: IV/realized × fundamentals cross-category (the +48 winning pattern)
+        {"template_id": "opt_12", "expression": "rank(ts_backfill(implied_volatility_call_120, 60) / (ts_backfill(parkinson_volatility_120, 60) + 0.001) * snt1_d1_netearningsrevision)"},
+        {"template_id": "opt_13", "expression": "rank(ts_backfill(implied_volatility_call_120, 60) / (ts_backfill(parkinson_volatility_120, 60) + 0.001) * forward_ebitda_to_enterprise_value_2)"},
+        # v6.2.1: Options term structure (long vs short IV spread)
+        {"template_id": "opt_14", "expression": "rank(ts_backfill(implied_volatility_call_120, 60) - ts_backfill(implied_volatility_call_30, 60))"},
+        {"template_id": "opt_15", "expression": "rank((ts_backfill(implied_volatility_call_120, 60) - ts_backfill(implied_volatility_call_30, 60)) * rank(adv20))"},
+        # v6.2.1: PCR mean reversion (high PCR → oversold → buy)
+        {"template_id": "opt_16", "expression": "rank(ts_zscore(ts_backfill(pcr_oi_60, 60), 20))"},
     ],
     "news_sentiment": [
         {"template_id": "ns_01", "expression": "rank(ts_backfill(scl12_sentiment, 60))"},
@@ -90,6 +104,12 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "ns_06", "expression": "rank(ts_backfill(rp_css_earnings, 60) - ts_backfill(rp_css_credit, 60))"},
         {"template_id": "ns_07", "expression": "-ts_std_dev(ts_backfill(scl12_buzz, 60), {n})"},
         {"template_id": "ns_08", "expression": "-rank(ts_backfill(scl12_buzz, 60) / (ts_mean(ts_backfill(scl12_buzz, 60), {n}) + 0.001))"},
+        # v6.2.1: News × reversion combos (cross-category, likely uncorrelated with portfolio)
+        {"template_id": "ns_09", "expression": "rank(-ts_backfill(news_max_up_ret, 60) * ts_mean(-returns, {n}))"},
+        {"template_id": "ns_10", "expression": "rank(ts_backfill(rp_ess_earnings, 60) * -ts_mean(returns, {n}))"},
+        {"template_id": "ns_11", "expression": "rank(ts_backfill(scl12_sentiment, 60) * rank(adv20) * -returns)"},
+        # v6.2.1: News momentum (buzz acceleration)
+        {"template_id": "ns_12", "expression": "rank(ts_delta(ts_backfill(scl12_buzz, 60), 5) * ts_backfill(scl12_sentiment, 60))"},
     ],
     "vol_regime": [
         {"template_id": "vr_01", "expression": "trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.55, -ts_regression(returns, ts_delay(returns, 1), 252, rettype=2), -1)"},
@@ -191,6 +211,11 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "rb_05", "expression": "-rank(correlation_last_60_days_spy) * rank(adv20)"},
         {"template_id": "rb_06", "expression": "-rank(beta_last_60_days_spy) + rank({deep_field} / cap)"},
         {"template_id": "rb_07", "expression": "-rank(beta_last_60_days_spy) + -rank(ts_mean(returns, {m}))"},
+        # v6.2.1: Cross-category beta × fundamentals (beta is genuinely different data)
+        {"template_id": "rb_08", "expression": "rank(-beta_last_60_days_spy * forward_ebitda_to_enterprise_value_2)"},
+        {"template_id": "rb_09", "expression": "rank(-beta_last_60_days_spy) + rank(est_eps / close)"},
+        {"template_id": "rb_10", "expression": "rank(unsystematic_risk_last_60_days * gross_profit_to_assets_ratio)"},
+        {"template_id": "rb_11", "expression": "rank(-beta_last_60_days_spy * ts_backfill(implied_volatility_call_120, 60))"},
     ],
     "expanded_fundamental": [
         {"template_id": "ef_01", "expression": "rank(cashflow_op / assets) - rank(income / assets)"},
@@ -214,6 +239,14 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "ef_17", "expression": "rank(group_zscore(cashflow_op / assets, subindustry) + group_zscore(operating_income / (sales + 0.001), subindustry) - group_zscore(debt / assets, subindustry))"},
         # v5.9.1: Altman Z-Score composite
         {"template_id": "ef_18", "expression": "rank(1.2 * working_capital / (assets + 0.001) + 1.4 * retained_earnings / (assets + 0.001) + 3.3 * ebit / (assets + 0.001))"},
+        # v6.2.1: Proven academic anomalies (from previous research session)
+        # Accrual anomaly (Sloan 1996) — cash flow vs earnings gap
+        {"template_id": "ef_19", "expression": "rank(cashflow_op / assets) - rank(income / assets)"},
+        {"template_id": "ef_20", "expression": "-rank(ts_delta(assets_curr - liabilities_curr + debt_st, 252) / (ts_delay(assets, 252) + 0.001))"},
+        # Retained earnings reversion — proven S=1.55 in previous chat
+        {"template_id": "ef_21", "expression": "-ts_rank(retained_earnings, 500)"},
+        # Investment anomaly (Titman, Wei & Xie) — overinvestors underperform
+        {"template_id": "ef_22", "expression": "-rank(ts_delta(assets, 252) / (ts_delay(assets, 252) + 0.001))"},
     ],
     "analyst_estimates": [
         {"template_id": "ae_01", "expression": "group_rank(ts_rank(est_eps / close, 60), industry)"},
@@ -256,6 +289,10 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "iday_03", "expression": "-rank(ts_mean(high - low, {n}) / (close + 0.001))"},
         {"template_id": "iday_04", "expression": "rank(open / close - 1)"},
         {"template_id": "iday_05", "expression": "-rank(ts_mean(open / close - 1, {n}))"},
+        # v6.2.1: Intraday cross-category (genuinely different data from price returns)
+        {"template_id": "iday_06", "expression": "rank((close - open) / (high - low + 0.001) * snt1_d1_earningssurprise)"},
+        {"template_id": "iday_07", "expression": "rank(ts_zscore((high - low) / (close + 0.001), {n})) * rank(adv20)"},
+        {"template_id": "iday_08", "expression": "group_rank((close - low) / (high - low + 0.001), industry)"},
     ],
     "fundamental": [
         {"template_id": "fund_01", "expression": "rank({field})"},
@@ -266,6 +303,73 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "ans_01", "expression": "rank(ts_delta({analyst_field}, {n}))"},
         {"template_id": "ans_02", "expression": "-rank({sentiment_field} / (ts_mean({sentiment_field}, {n}) + 0.001))"},
         {"template_id": "ans_03", "expression": "rank(ts_zscore({analyst_field}, {n}))"},
+        # v6.2.1: Sentiment × reversion combos (cross-category, proven in +46 resim winner)
+        {"template_id": "ans_04", "expression": "rank(ts_backfill(snt1_d1_netearningsrevision, 60) * -ts_mean(returns, {n}))"},
+        {"template_id": "ans_05", "expression": "rank(ts_backfill(snt1_d1_earningssurprise, 60) * forward_ebitda_to_enterprise_value_2)"},
+        {"template_id": "ans_06", "expression": "rank(ts_backfill(consensus_analyst_rating, 60) * -ts_mean((close - vwap) / vwap, {n}))"},
+    ],
+
+    # ══════════════════════════════════════════════════════════════════
+    # v6.2.1: UNTAPPED DATA CATEGORIES — virtually zero portfolio correlation
+    # ══════════════════════════════════════════════════════════════════
+
+    # Vector datasets — multiple values per stock per day, use vec_* operators
+    # Most competitors skip these entirely. Proven: S=1.94 buzz alpha.
+    "vector_data": [
+        # Social buzz vectors — proven pattern: aggregate then smooth
+        {"template_id": "vec_01", "expression": "ts_av_diff(ts_backfill(-vec_sum(scl12_alltype_buzzvec), 20), 60)"},
+        {"template_id": "vec_02", "expression": "rank(ts_backfill(vec_avg(scl12_alltype_sentvec), 20))"},
+        {"template_id": "vec_03", "expression": "rank(ts_backfill(vec_count(scl12_alltype_buzzvec), 20) * -returns)"},
+        # News vectors — after-hours significance
+        {"template_id": "vec_04", "expression": "rank(ts_backfill(vec_sum(nws12_afterhsz_sl), 20))"},
+        {"template_id": "vec_05", "expression": "rank(ts_backfill(vec_avg(nws12_afterhsz_sl), 20) * -ts_mean(returns, {n}))"},
+        # Buzz × sentiment interaction
+        {"template_id": "vec_06", "expression": "rank(ts_backfill(vec_sum(scl12_alltype_buzzvec), 20) * ts_backfill(vec_avg(scl12_alltype_sentvec), 20))"},
+        # Buzz IR (information ratio — signal-to-noise of social media)
+        {"template_id": "vec_07", "expression": "rank(ts_backfill(vec_ir(scl12_alltype_buzzvec), 20))"},
+        # scl15 daily sentiment
+        {"template_id": "vec_08", "expression": "rank(ts_backfill(scl15_d1_sentiment, 60) * -ts_mean(returns, {n}))"},
+        # v6.2.1: pasteurize-wrapped variants (prevents NaN propagation in sparse vec data)
+        {"template_id": "vec_09", "expression": "rank(pasteurize(ts_backfill(vec_sum(scl12_alltype_buzzvec), 20)))"},
+        {"template_id": "vec_10", "expression": "rank(pasteurize(ts_backfill(vec_avg(nws12_afterhsz_sl), 20)) * -ts_mean(returns, {n}))"},
+        # v6.2.1: News-conditional regime switching — proven S=1.84
+        {"template_id": "vec_11", "expression": "trade_when(rank(ts_sum(ts_backfill(vec_avg(nws12_afterhsz_sl), 20), 60)) > 0.5, rank(-ts_delta(close, 2)), -1)"},
+    ],
+
+    # Model data fields — pre-computed proprietary signals most users overlook
+    # Proven: mdf_eg3 alpha achieved S=1.59, F=1.70
+    "model_data": [
+        # Net Piotroski Score — quality composite
+        {"template_id": "mdf_01", "expression": "rank(ts_backfill(mdf_nps, 60))"},
+        {"template_id": "mdf_02", "expression": "rank(ts_backfill(mdf_nps, 60) * -ts_mean(returns, {n}))"},
+        # Operating Earnings Yield — value signal
+        {"template_id": "mdf_03", "expression": "rank(ts_backfill(mdf_oey, 60))"},
+        {"template_id": "mdf_04", "expression": "group_rank(ts_backfill(mdf_oey, 60), industry)"},
+        # Earnings growth × sales growth correlation — proven S=1.59 pattern
+        {"template_id": "mdf_05", "expression": "rank(-ts_av_diff(ts_backfill(mdf_eg3, 60), 50) * ts_corr(ts_backfill(mdf_eg3, 60), ts_backfill(mdf_sg3, 60), 50))"},
+        # R&D intensity — innovation signal
+        {"template_id": "mdf_06", "expression": "rank(ts_backfill(mdf_rds, 60) * rank(adv20))"},
+        # Model Price-to-Book
+        {"template_id": "mdf_07", "expression": "rank(-ts_backfill(mdf_pbk, 60))"},
+        # mdl175 cross-category
+        {"template_id": "mdf_08", "expression": "rank(ts_backfill(mdl175_grossprofit, 60) / (ts_backfill(mdl175_revenuettm, 60) + 0.001))"},
+    ],
+
+    # Event-driven — fundamental events and analyst estimate changes
+    # Uses days_from_last_change() and last_diff_value() for timing
+    "event_driven": [
+        # Forward EPS — proven S=2.03 on TOP1000
+        {"template_id": "evt_01", "expression": "rank(ts_rank(ts_backfill(fnd6_epsfx, 60) / close, 40))"},
+        {"template_id": "evt_02", "expression": "rank(ts_backfill(fnd6_epsfx, 60) / close)"},
+        # EPS revision freshness — recent changes matter more
+        {"template_id": "evt_03", "expression": "rank(last_diff_value(est_eps) / (days_from_last_change(est_eps) + 1))"},
+        # Earnings surprise percentage
+        {"template_id": "evt_04", "expression": "rank(ts_backfill(fam_earn_surp_pct, 60))"},
+        {"template_id": "evt_05", "expression": "rank(ts_backfill(fam_earn_surp_pct, 60) * -ts_mean(returns, {n}))"},
+        # ROE rank × reversion
+        {"template_id": "evt_06", "expression": "rank(ts_backfill(fam_roe_rank, 60) * -ts_mean(returns, {n}))"},
+        # Event timing + fundamental
+        {"template_id": "evt_07", "expression": "rank(last_diff_value(est_eps) * (est_eps / close))"},
     ],
 }
 

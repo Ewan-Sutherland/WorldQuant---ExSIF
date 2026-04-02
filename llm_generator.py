@@ -169,6 +169,34 @@ VALID_FIELDS.update({
     "est_sales", "est_netprofit", "est_dividend_ps",
 })
 
+# v6.2.1: Vector dataset fields (multiple values per stock per day — use vec_* operators)
+VALID_FIELDS.update({
+    # Social media vectors
+    "scl12_alltype_buzzvec", "scl12_alltype_sentvec",
+    "scl15_d1_sentiment",
+    # News vectors
+    "nws12_afterhsz_sl", "nws12_prez_result2",
+    # Fundamental event vectors
+    "fnd6_newqeventv110_optrfrq", "fnd6_epsfx",
+})
+
+# v6.2.1: Model data fields (pre-computed proprietary signals — most competitors ignore these)
+VALID_FIELDS.update({
+    "mdf_nps",   # Net Piotroski Score
+    "mdf_oey",   # Operating Earnings Yield
+    "mdf_rds",   # R&D intensity score
+    "mdf_pbk",   # Model Price-to-Book
+    "mdf_eg3",   # 3-year earnings growth
+    "mdf_sg3",   # 3-year sales growth
+    "mdl175_volatility", "mdl175_revenuettm", "mdl175_grossprofit",
+})
+
+# v6.2.1: Extended analyst/fundamental event fields
+VALID_FIELDS.update({
+    "fam_earn_surp_pct",  # Earnings surprise percentage
+    "fam_roe_rank",       # ROE rank
+})
+
 
 # ── Operators ───────────────────────────────────────────────────────
 
@@ -187,9 +215,19 @@ VALID_OPERATORS = {
     "signed_power", "sqrt", "inverse", "reverse", "hump",
     "last_diff_value", "days_from_last_change", "kth_element",
     "pasteurize",
+    "ts_av_diff",  # v6.2.1: ts_mean(x,n) - x — proven in mdf_eg3 alpha (S=1.59)
 }
 
 LOCKED_OPERATORS = {"ts_skewness", "ts_kurtosis", "ts_momentum"}
+
+# v6.2: Fields that don't exist in WQ BRAIN but LLMs keep generating
+BANNED_FIELDS = {
+    "unsystematic_risk",   # correct form is unsystematic_risk_last_30_days etc.
+    "systematic_risk",     # correct form is systematic_risk_last_30_days etc.
+    "short_interest",      # not a valid field name
+    "institutional_ownership",  # not available
+    "put_call_ratio",      # use pcr_oi_30 etc. instead
+}
 
 
 # ── Comprehensive system prompt ─────────────────────────────────────
@@ -285,7 +323,26 @@ RAVENPACK NEWS (sparse — ALWAYS use ts_backfill):
 
 SUPPLY CHAIN: rel_ret_cust, rel_ret_comp, rel_num_cust, rel_num_comp
 
-RISK: beta_last_60_days_spy, unsystematic_risk, systematic_risk
+RISK: beta_last_60_days_spy, unsystematic_risk_last_60_days, systematic_risk_last_60_days
+  (NOTE: always use the full field name with window suffix — bare "unsystematic_risk" is INVALID)
+
+MODEL DATA (mdf_* — pre-computed proprietary signals, most competitors skip these):
+  mdf_nps (Piotroski Score), mdf_oey (Operating Earnings Yield), mdf_rds (R&D intensity),
+  mdf_pbk (Price-to-Book), mdf_eg3 (3yr earnings growth), mdf_sg3 (3yr sales growth)
+  mdl175_volatility, mdl175_revenuettm, mdl175_grossprofit
+  ALWAYS wrap in ts_backfill(field, 60) — these are sparse.
+  PROVEN: -ts_av_diff(mdf_eg3, 50) * ts_corr(mdf_eg3, mdf_sg3, 50) → S=1.59, F=1.70
+
+VECTOR DATASETS (use vec_* operators — multiple values per stock per day):
+  scl12_alltype_buzzvec, scl12_alltype_sentvec, nws12_afterhsz_sl, scl15_d1_sentiment
+  Operators: vec_avg(x), vec_sum(x), vec_count(x), vec_max(x), vec_min(x), vec_ir(x)
+  Pattern: ts_backfill(vec_sum(scl12_alltype_buzzvec), 20) to aggregate, then rank/smooth.
+  PROVEN: ts_av_diff(ts_backfill(-vec_sum(scl12_alltype_buzzvec), 20), 60) → S=1.94, F=1.35
+
+EVENT-DRIVEN (fnd6_*, fam_* — timing signals):
+  fnd6_epsfx (forward EPS), fam_earn_surp_pct (earnings surprise %), fam_roe_rank
+  Operators: days_from_last_change(x), last_diff_value(x), ts_av_diff(x, n)
+  PROVEN: rank(ts_rank(fnd6_epsfx/close, 40)) → S=2.03, F=1.58
 
 ═══════════════════════════════════════════════════
 PATTERNS THAT ACTUALLY PASS (Sharpe > 1.25, Fitness > 1.0)
@@ -322,6 +379,7 @@ def _build_generation_prompt(
     underexplored_categories: list[str],
     recent_failures: list[dict],
     recent_eligible_count: int,
+    recently_generated: list[str] | None = None,
     num_expressions: int = 5,
 ) -> str:
     """Build hypothesis-first user prompt with portfolio context."""
@@ -355,15 +413,42 @@ def _build_generation_prompt(
             f"\nUNDEREXPLORED CATEGORIES — prioritize these: {', '.join(underexplored_categories)}\n"
         )
 
+    # v6.2: Tell LLM what was already generated this session to prevent repeats
+    recently_generated_section = ""
+    if recently_generated:
+        recently_generated_section = "\nALREADY GENERATED THIS SESSION — do NOT repeat these:\n"
+        for expr in recently_generated[-15:]:
+            recently_generated_section += f"  {expr[:100]}\n"
+
     return f"""Generate {num_expressions} alpha expressions. Each must target a DIFFERENT market anomaly.
 
 {submitted_section}
 {near_passer_section}
 {failure_section}
 {underexplored_section}
+{recently_generated_section}
 
 OVERUSED FIELDS — do NOT use these, they've been tried hundreds of times:
   cashflow_efficiency_rank_derivative, growth_potential_rank_derivative, operating_income
+
+⚠️ PORTFOLIO-ADDITIVE PRIORITY:
+Our portfolio is SATURATED with price_returns and model77 signals. New alphas using those
+HURT our score even if they pass individually. The ONLY way to gain points is through
+genuinely different data:
+  1. VECTOR DATA: vec_sum(scl12_alltype_buzzvec), vec_avg(nws12_afterhsz_sl) (PROVEN S=1.94)
+  2. MODEL DATA: mdf_nps, mdf_eg3, mdf_oey, mdl175_* (PROVEN S=1.59)
+  3. EVENT-DRIVEN: fnd6_epsfx, fam_earn_surp_pct, days_from_last_change (PROVEN S=2.03)
+  4. OPTIONS: implied_volatility_call_120 / parkinson_volatility_120 ratio (PROVEN +48 pts)
+  5. NEWS: rp_ess_earnings, rp_css_earnings, news_max_up_ret, news_pct_1min
+  6. SENTIMENT: snt1_d1_earningssurprise, snt1_d1_netearningsrevision, scl12_sentiment
+
+WINNING PATTERN EXAMPLES:
+  rank(ts_rank(ts_backfill(fnd6_epsfx, 60) / close, 40))  → S=2.03
+  ts_av_diff(ts_backfill(-vec_sum(scl12_alltype_buzzvec), 20), 60)  → S=1.94
+  rank(-ts_av_diff(ts_backfill(mdf_eg3, 60), 50) * ts_corr(ts_backfill(mdf_eg3, 60), ts_backfill(mdf_sg3, 60), 50))  → S=1.59
+
+At least 3 of your {num_expressions} expressions MUST use VECTOR, MODEL, EVENT, OPTIONS, or NEWS data.
+Combine them with fundamentals or reversion for the best results.
 
 Rules:
 - Each expression uses DIFFERENT primary data fields from every other expression
@@ -388,6 +473,11 @@ class LLMClient:
         self._gemini_calls_today = 0
         self._groq_calls_today = 0
         self._last_reset_day = 0
+        # v6.2.1: Warn if Groq fallback is unavailable
+        if not self.groq_key:
+            print("[LLM_WARN] GROQ_API_KEY not set — no fallback when Gemini rate-limits!")
+        if not self.gemini_key:
+            print("[LLM_WARN] GEMINI_API_KEY not set — will try Groq only")
 
     def _reset_daily_counters(self):
         today = int(time.time() // 86400)
@@ -545,6 +635,11 @@ def validate_expression(expr: str) -> tuple[bool, str]:
         if locked in expr_lower:
             return False, f"locked_operator: {locked}"
 
+    # v6.2: Check for banned fields (invalid WQ variables the LLM keeps generating)
+    for banned in BANNED_FIELDS:
+        if banned in expr_lower:
+            return False, f"banned_field: {banned}"
+
     # Must contain rank() somewhere
     if "rank" not in expr_lower and "group_rank" not in expr_lower:
         return False, "no_rank"
@@ -644,6 +739,7 @@ class LLMAlphaGenerator:
         self._total_failed_calls = 0
         self._recent_failures: list[dict] = []  # Track failed expressions for feedback
         self._last_api_call_time: float = 0.0  # v5.9: Rate limit cooldown
+        self._session_generated_cores: list[str] = []  # v6.2: Track recently generated for dedup prompt
 
     @property
     def available(self) -> bool:
@@ -713,6 +809,7 @@ class LLMAlphaGenerator:
             underexplored_categories=underexplored_categories,
             recent_failures=self._recent_failures,
             recent_eligible_count=recent_eligible_count,
+            recently_generated=self._session_generated_cores,
             num_expressions=6,
         )
 
@@ -750,6 +847,13 @@ class LLMAlphaGenerator:
 
         if expressions:
             self._cache.extend(expressions)
+            # v6.2: Track generated cores to prevent repeats in next API call
+            for expr in expressions:
+                core = expr.strip().lower()
+                if core not in self._session_generated_cores:
+                    self._session_generated_cores.append(core)
+            # Keep last 30
+            self._session_generated_cores = self._session_generated_cores[-30:]
             print(
                 f"[LLM_GEN] Generated {len(expressions)} valid expressions "
                 f"(api_calls={self._total_api_calls} total_valid={self._total_valid} "

@@ -54,6 +54,10 @@ class AlphaBot:
         self.passed_cores: dict[str, int] = {}  # core_signal → number of times passed
         # v6.1: Cores that WQ has rejected for self-correlation — skip submission, not simulation
         self.rejected_cores: set[str] = set()
+        # v6.2: Cores that produce negative score changes — skip further refinement
+        self._score_negative_cores: set[str] = set()
+        # v6.2: Track consecutive diversity skips per base to fast-exhaust
+        self._diversity_skip_count: dict[str, int] = {}
         # v6.0: Track refinement attempts per CORE SIGNAL to prevent same expression via different candidates
         self.refinement_attempts_by_core: dict[str, int] = {}
         # v6.0: Track recently simulated LLM expressions to prevent duplicates
@@ -338,10 +342,13 @@ class AlphaBot:
             return
 
         # v6.2: Don't queue refinement for cores already rejected by WQ self-correlation
+        # or cores that produce negative score changes
         candidate_row_check = self.storage.get_candidate_by_id(candidate_id)
         if candidate_row_check:
             core = self._extract_core_signal(candidate_row_check.get("canonical_expression", ""))
             if core and core in self.rejected_cores:
+                return
+            if core and core in self._score_negative_cores:
                 return
 
         # v6.1: Eligible alphas get settings-only refinement to find optimal version
@@ -865,6 +872,10 @@ class AlphaBot:
                     f"\n  📉 ALL variants would hurt score — skipping.\n"
                     f"{'='*60}\n"
                 )
+                # v6.2: Block further refinement of this core — it hurts the portfolio
+                if core:
+                    self._score_negative_cores.add(core)
+                    print(f"[SCORE_NEG_BLOCK] core='{core[:60]}' — blocking further refinement")
 
     def _check_submission_portfolio_fit(
         self,
@@ -971,6 +982,23 @@ class AlphaBot:
             "sales_surprise_score", "price_momentum_module",
             "fundamental_growth_module", "cash_burn_rate",
         ])
+        # v6.2.1: Vector datasets (vec_* operators on multi-value fields)
+        has_vector = any(f in expr_lower for f in [
+            "vec_avg", "vec_sum", "vec_count", "vec_max", "vec_min",
+            "vec_stddev", "vec_range", "vec_ir",
+            "scl12_alltype_buzzvec", "scl12_alltype_sentvec",
+            "nws12_", "scl15_",
+        ])
+        # v6.2.1: Model data (mdf_*, mdl175_*)
+        has_model_data = any(f in expr_lower for f in [
+            "mdf_nps", "mdf_oey", "mdf_rds", "mdf_pbk", "mdf_eg3", "mdf_sg3",
+            "mdl175_",
+        ])
+        # v6.2.1: Event-driven (fnd6_*, fam_*, days_from_last_change, last_diff_value)
+        has_event = any(f in expr_lower for f in [
+            "fnd6_", "fam_earn_surp", "fam_roe_rank",
+            "days_from_last_change", "last_diff_value",
+        ])
         has_relationship = any(f in expr_lower for f in [
             "rel_ret_", "rel_num_", "pv13_",
         ])
@@ -987,6 +1015,13 @@ class AlphaBot:
             "fn_liab_fair_val", "sharesout",
         ])
 
+        # v6.2.1: Check untapped data categories first (most different from portfolio)
+        if has_vector:
+            return "vector_data"
+        if has_model_data:
+            return "model_data"
+        if has_event:
+            return "event_driven"
         if has_model77:
             return "model77"
         if has_relationship:
@@ -1001,10 +1036,14 @@ class AlphaBot:
         has_options = any(f in expr_lower for f in [
             "implied_volatility", "historical_volatility",
             "call_breakeven", "forward_price", "put_breakeven",
-            "parkinson_volatility",
+            "parkinson_volatility", "pcr_oi", "pcr_vol",
         ])
         has_sentiment = any(f in expr_lower for f in [
             "scl12_", "snt_", "snt1_",
+        ])
+        # v6.2.1: Add news category (was missing — rp_ess/rp_css/news_* were "unknown")
+        has_news = any(f in expr_lower for f in [
+            "rp_ess_", "rp_css_", "news_pct", "news_max", "news_ls",
         ])
         has_fundamental = any(f in expr_lower for f in [
             "cashflow_op", "ebitda", "ebit", "eps", "debt", "equity",
@@ -1020,13 +1059,23 @@ class AlphaBot:
         has_volume = any(f in expr_lower for f in [
             "volume", "adv20",
         ])
+        # v6.2.1: Intraday patterns (open/close/high/low without returns)
+        has_intraday = (
+            any(f in expr_lower for f in ["open", "high", "low"])
+            and "close" in expr_lower
+            and "returns" not in expr_lower
+        )
 
         if has_options and not has_price:
             return "options_vol"
         if has_options and has_price:
             return "options_vol"
+        if has_news:
+            return "news"
         if has_sentiment:
             return "sentiment"
+        if has_intraday:
+            return "intraday"
         if has_fundamental and not has_price:
             return "fundamental"
         if has_factor_model:
@@ -1543,18 +1592,37 @@ class AlphaBot:
         submitted_exprs = [r["canonical_expression"] for r in submitted_rows]
 
         # Get near-passers for the LLM to learn from
+        # v6.2.1: Prioritize showing portfolio-additive near-passers to the LLM
         near_passers = []
         try:
             ref_rows = self.storage.get_similarity_reference_candidates(
                 limit=20, min_sharpe=1.15, min_fitness=0.60,
             )
+            additive_keywords = {
+                "implied_volatility", "parkinson_volatility", "pcr_",
+                "rp_ess_", "rp_css_", "news_", "scl12_", "snt1_d1_",
+                "rel_ret_", "beta_last", "unsystematic_risk",
+                # v6.2.1: vector/model/event data
+                "vec_sum", "vec_avg", "vec_count", "buzzvec", "sentvec",
+                "nws12_", "scl15_", "mdf_", "mdl175_", "fnd6_", "fam_",
+                "days_from_last_change", "last_diff_value",
+            }
+            additive_passers = []
+            other_passers = []
             for r in ref_rows:
-                near_passers.append({
+                entry = {
                     "expression": r.get("canonical_expression", ""),
                     "sharpe": float(r.get("sharpe", 0) or 0),
                     "fitness": float(r.get("fitness", 0) or 0),
                     "reason": r.get("fail_reason", "") or "",
-                })
+                }
+                expr_lower = entry["expression"].lower()
+                if any(kw in expr_lower for kw in additive_keywords):
+                    additive_passers.append(entry)
+                else:
+                    other_passers.append(entry)
+            # Show additive near-passers first, then fill with others
+            near_passers = additive_passers[:4] + other_passers[:2]
         except Exception:
             pass
 
@@ -1569,6 +1637,9 @@ class AlphaBot:
             # v5.9: New data source categories
             "model77", "relationship", "risk_beta",
             "expanded_fundamental", "analyst_estimates",
+            # v6.2.1: Added missing categories
+            "news", "intraday",
+            "vector_data", "model_data", "event_driven",
         }
         underexplored = sorted(all_categories - submitted_categories)
 
@@ -1731,6 +1802,12 @@ class AlphaBot:
                     print(f"[REFINE_SKIP_CORR] core='{core[:60]}' — already rejected by WQ, skipping refinement")
                     continue
 
+                # v6.2: Skip if core already produced negative score changes
+                if core and core in self._score_negative_cores:
+                    self.storage.mark_refinement_consumed(base_candidate_id)
+                    print(f"[REFINE_SKIP_SCORE] core='{core[:60]}' — negative score change, skipping refinement")
+                    continue
+
                 if self._should_abandon_refinement_base(base_candidate_id):
                     self.storage.mark_refinement_consumed(base_candidate_id)
                     self.refinement_attempts_by_base.pop(base_candidate_id, None)
@@ -1828,10 +1905,23 @@ class AlphaBot:
                     continue
 
                 if not self._candidate_allowed_by_diversity(candidate, is_refinement=True):
-                    print(
-                        f"[DIVERSITY_SKIP] template={candidate.template_id} family={candidate.family} "
-                        f"expr={candidate.expression}"
+                    # v6.2: Track consecutive diversity skips — fast-exhaust after 2
+                    self._diversity_skip_count[base_candidate_id] = (
+                        self._diversity_skip_count.get(base_candidate_id, 0) + 1
                     )
+                    if self._diversity_skip_count[base_candidate_id] >= 2:
+                        self.storage.mark_refinement_consumed(base_candidate_id)
+                        self.refinement_attempts_by_base.pop(base_candidate_id, None)
+                        self._diversity_skip_count.pop(base_candidate_id, None)
+                        print(
+                            f"[DIVERSITY_EXHAUST] base={base_candidate_id[:30]} "
+                            f"— 2+ diversity skips, consuming"
+                        )
+                    else:
+                        print(
+                            f"[DIVERSITY_SKIP] template={candidate.template_id} family={candidate.family} "
+                            f"expr={candidate.expression}"
+                        )
                     continue
 
                 # Don't consume base — let it be retried until attempts exhausted
@@ -1889,16 +1979,21 @@ class AlphaBot:
                         )
                         continue
 
-            # v6.0.1: Log if candidate shares core with already-submitted alpha
-            # but NEVER block — WQ's self-correlation check is the authority.
-            # Failed submissions don't count against daily cap. Better to waste a sim
-            # than miss an alpha. Rejections are logged in Supabase with self_corr value.
+            # v6.2: Hard-block candidates sharing core with 2+ already-submitted alphas.
+            # WQ's self-correlation check almost always rejects variants of well-covered cores.
+            # Saves ~15-20 wasted sims per overnight run.
             if self.passed_cores:
                 core = self._extract_core_signal(candidate.canonical_expression)
-                if core and self.passed_cores.get(core, 0) >= 1:
+                if core and self.passed_cores.get(core, 0) >= 2:
+                    print(
+                        f"[CORE_OVERLAP_BLOCK] template={candidate.template_id} family={candidate.family} "
+                        f"core='{core[:60]}' — {self.passed_cores[core]} already submitted, BLOCKING"
+                    )
+                    continue
+                elif core and self.passed_cores.get(core, 0) == 1:
                     print(
                         f"[CORE_OVERLAP] template={candidate.template_id} family={candidate.family} "
-                        f"core='{core[:60]}' — {self.passed_cores[core]} already submitted, simulating anyway"
+                        f"core='{core[:60]}' — 1 already submitted, allowing variant"
                     )
 
             try:

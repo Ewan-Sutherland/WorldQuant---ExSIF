@@ -43,6 +43,13 @@ CATEGORY_KEYWORDS = {
     "risk": ["beta_last", "unsystematic_risk", "systematic_risk"],
     "fscore": ["fscore_", "cashflow_efficiency_rank", "growth_potential_rank",
                "composite_factor_score", "earnings_certainty_rank"],
+    # v6.2.1: Untapped data categories
+    "vector_data": ["vec_sum", "vec_avg", "vec_count", "buzzvec", "sentvec",
+                     "nws12_", "scl15_"],
+    "model_data": ["mdf_nps", "mdf_oey", "mdf_rds", "mdf_eg3", "mdf_sg3",
+                    "mdf_pbk", "mdl175_"],
+    "event_driven": ["fnd6_", "fam_earn_surp", "fam_roe_rank",
+                      "days_from_last_change", "last_diff_value"],
 }
 
 
@@ -117,10 +124,18 @@ class SignalCombiner:
             f"{', '.join(f'{c}={len(self._near_passers_by_category[c])}' for c in cats)}"
         )
 
+    # v6.2.1: Categories that are proven portfolio-ADDITIVE (genuinely different data)
+    # The portfolio is saturated with price_returns/model77/fundamental.
+    # Combos that include one of these categories are far more likely to improve score.
+    PORTFOLIO_ADDITIVE_CATS = {"options_vol", "news", "sentiment", "risk", "vector_data", "model_data", "event_driven"}
+
     def generate_combo(self, n_signals: int = 2) -> Optional[str]:
         """
         Generate a composite expression combining n_signals from different categories.
         Returns expression string or None if not enough diversity.
+        
+        v6.2.1: Biased toward including at least one portfolio-additive category
+        (options_vol, news, sentiment, risk) since those are proven to improve score.
         
         Research finding: rank(A * B) outperforms rank(A) + rank(B).
         Three forms (picked randomly):
@@ -139,7 +154,22 @@ class SignalCombiner:
         if len(available_cats) < n_signals:
             return None
 
-        chosen_cats = self.rng.sample(available_cats, n_signals)
+        # v6.2.1: Bias toward portfolio-additive categories
+        # 70% of the time, force one component from the additive set
+        additive_available = [c for c in available_cats if c in self.PORTFOLIO_ADDITIVE_CATS]
+        other_available = [c for c in available_cats if c not in self.PORTFOLIO_ADDITIVE_CATS]
+
+        if additive_available and other_available and self.rng.random() < 0.70:
+            # Pick one additive + rest from other categories
+            first_cat = self.rng.choice(additive_available)
+            remaining_pool = [c for c in available_cats if c != first_cat]
+            if len(remaining_pool) >= n_signals - 1:
+                rest = self.rng.sample(remaining_pool, n_signals - 1)
+                chosen_cats = [first_cat] + rest
+            else:
+                chosen_cats = self.rng.sample(available_cats, n_signals)
+        else:
+            chosen_cats = self.rng.sample(available_cats, n_signals)
 
         # Pick the best signal from each category (with some randomization)
         components = []
@@ -163,6 +193,13 @@ class SignalCombiner:
         else:
             expr = self._build_three_signal_combo(components, mode)
 
+        # v6.2: Check operator count BEFORE returning — WQ limit is 64
+        op_count = self._count_operators(expr)
+        if op_count > 60:
+            cats_str = "+".join(c["category"] for c in components)
+            print(f"[COMBO_OP_LIMIT] {op_count} operators in {cats_str} combo (limit 60), skipping")
+            return None
+
         cats_str = "+".join(c["category"] for c in components)
         sharpes = [c["sharpe"] for c in components]
         print(
@@ -171,6 +208,12 @@ class SignalCombiner:
         )
 
         return expr
+
+    @staticmethod
+    def _count_operators(expr: str) -> int:
+        """Count function-call operators in an expression (word followed by open paren)."""
+        import re
+        return len(re.findall(r'[a-z_]+\s*\(', expr))
 
     def _build_two_signal_combo(
         self, sig_a: dict, sig_b: dict, mode: str,
