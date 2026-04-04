@@ -103,7 +103,7 @@ SOFT_PRUNE_REFINEMENT_PROBABILITY = 0.35
 AUTO_SUBMIT = False
 
 # v6.2: Number of Optuna settings variants to try per eligible alpha
-OPTIMIZE_VARIANTS = 8
+OPTIMIZE_VARIANTS = 5
 
 # v6.2: IQC competition ID for before-and-after-performance endpoint
 IQC_COMPETITION_ID = os.getenv("IQC_COMPETITION_ID", "IQC2026S1")
@@ -166,8 +166,8 @@ FAMILY_BASE_WEIGHTS = {
     "model77_anomaly": 0.10,    # DEAD — standalone fields don't work
     "model77_combo": 0.80,      # v6.2.1: was 4.00 — 82 sims, 0% submit, hurts portfolio score
     "expanded_fundamental": 0.40,  # v6.2.1: was 0.80 — saturated data category
-    "relationship": 1.20,       # v6.2.1: was 0.60 — supply chain is genuinely novel data
-    "risk_beta": 0.60,          # v6.2.1: was 0.10 — beta is different data, needs better templates
+    "relationship": 0.10,       # v6.2.1: 60 sims, S=0.10, 0% submit — DEAD, wasting sims
+    "risk_beta": 0.10,          # v6.2.1: 12 sims, S=-0.05, 0% submit — DEAD
     "analyst_estimates": 1.50,  # ae_01 works but saturating
     "wq_proven": 1.50,          # wp_05 works (23 eligible), wp_02 works (4 eligible)
     # v5.8: Multi-factor combinations
@@ -181,10 +181,10 @@ FAMILY_BASE_WEIGHTS = {
     # v6.2.1: PORTFOLIO-ADDITIVE — boost genuinely different data categories
     "fundamental_value": 0.50,  # v6.2.1: was 1.00 — saturated with fundamentals
     "quality_trend": 0.60,
-    "fundamental_scores": 0.50, # v6.2.1: was 1.00 — CW problems, saturated
+    "fundamental_scores": 0.10, # v6.2.1: 11 sims, S=-0.07 — DEAD
     "earnings_momentum": 1.80,  # v6.2.1: was 1.20 — some signal, underexplored standalone
     "options_vol": 3.50,        # v6.2.1: was 1.00 — PROVEN portfolio-additive (all 4 winners)
-    "news_sentiment": 2.50,     # v6.2.1: was 1.00 — unexplored, likely uncorrelated
+    "news_sentiment": 0.50,     # v6.2.1: 8 sims, S=-0.01 — weak, reduce exploration
     "vol_regime": 0.60,
     "size_value": 0.40,
     # MEDIUM — legacy
@@ -192,7 +192,7 @@ FAMILY_BASE_WEIGHTS = {
     "price_vol_corr": 0.20,
     "analyst_sentiment": 2.00,  # v6.2.1: was 0.30 — works in combos (snt1_d1 signals)
     "volatility": 0.15,
-    "intraday": 1.50,           # v6.2.1: was 0.15 — open/close patterns are different data
+    "intraday": 0.05,           # v6.2.1: 14 sims, S=-0.66 — DEAD
     "fundamental": 0.10,
     "momentum": 0.05,
     # v6.2.1: UNTAPPED DATA — virtually zero correlation with existing portfolio
@@ -200,16 +200,18 @@ FAMILY_BASE_WEIGHTS = {
     "model_data": 0.01,     # v6.2.1: ALL mdf_*, mdl175_* fields DEAD on this account
     "event_driven": 0.01,   # v6.2.1: ALL fnd6_*, fam_* fields DEAD on this account
     # v6.2.1: NEW FAMILIES — 10 completely untapped data categories
-    "supply_chain": 4.00,       # pv13_* — 165 fields, ZERO submitted, academic backing, fewest users
-    "ravenpack_cat": 3.50,      # rp_css_*/rp_ess_* — 75 fields, ZERO submitted, novelty-weighted
-    "options_analytics": 3.00,  # call_breakeven/forward_price — 74 fields, ZERO submitted
-    "hist_vol": 2.50,           # historical_volatility vs IV spread — vol risk premium
-    "fscore": 2.50,             # fscore_bfl_* quality scores — 24 fields, proven factor
-    "risk_metrics": 2.50,       # beta/correlation/systematic risk — low-beta anomaly
-    "intraday_pattern": 2.00,   # open/high/low patterns — genuinely different data
-    "analyst_deep": 2.00,       # snt1_d1_earningstorpedo etc — deeper sentiment fields
-    "social_scalar": 1.50,      # scl12_buzz/sentiment scalar — ZERO submitted
-    "wild_combos": 1.50,        # cross-category novel interactions
+    "supply_chain": 4.00,       # pv13_* — 14 sims S=0.34, still exploring, academic backing
+    "ravenpack_cat": 3.50,      # rp_ess_* — 14 sims, rp_04 averaging S=1.07, PROMISING
+    "options_analytics": 0.10,  # v6.2.1: 8 sims, S=-0.15 — DEAD
+    "hist_vol": 3.00,           # v6.2.1: 14 sims, S=0.62, F=0.75 — WORKING, boost
+    "fscore": 0.10,             # v6.2.1: 10 sims, S=-0.28 — DEAD
+    "risk_metrics": 0.10,       # v6.2.1: 15 sims, S=0.13 — barely alive, suppress
+    "intraday_pattern": 0.50,   # v6.2.1: 8 sims, S=0.17 — weak but not dead
+    "analyst_deep": 0.10,       # v6.2.1: 6 sims, S=-0.22 — DEAD
+    "social_scalar": 0.10,      # v6.2.1: 1 sim, S=-0.55 — looks dead
+    "wild_combos": 0.10,        # v6.2.1: 7 sims, S=-0.23 — DEAD
+    "tutorial_proven": 3.00,    # v6.2.1: expressions from WQ official tutorial
+    "high_sharpe": 5.00,        # v6.2.1: research-proven S>2.0 patterns — HIGHEST PRIORITY
 }
 
 TEMPLATE_BASE_WEIGHTS = {
@@ -293,6 +295,14 @@ TEMPLATE_WEIGHT_PENALTIES = {
     "m77_09": 0.05,
     # v6.2.1: wp_05 core (operating_income/cap) has 3+ submissions — always blocked by CORE_OVERLAP
     "wp_05": 0.01,
+    # v6.2.1: HARD PRUNE from 600+ sim analysis
+    "llm_rela": 0.01,    # 23 sims, S=-0.05, hard_prune — relationship family LLM waste
+    "llm_cros": 0.01,    # 8 sims, S=-0.31, hard_prune — cross-sectional LLM waste
+    "llm_llm_": 0.05,    # 11 sims, S=0.06, hard_prune — generic LLM waste
+    "rel_01": 0.01,       # rank(rel_ret_cust) — S=-0.64
+    "rel_02": 0.01,       # -rank(rel_ret_comp) — S=-0.20
+    "fs_06": 0.01,        # composite_factor_score_derivative — S=-0.08
+    "fs_08": 0.01,        # analyst_revision * cap — S=-0.33
 }
 
 # v5.9.1: Boost model77_combo templates (near-passers at S=1.47)
@@ -301,6 +311,14 @@ PREFERRED_TEMPLATE_BOOSTS.update({
     "m7c_02": 1.50,      # combo with -rank(returns)
     "m7c_01": 1.40,
     "m7c_04": 1.40,
+    # v6.2.1: Boost promising templates from latest 600+ sim data
+    "rp_04": 2.50,       # ravenpack insider × vwap reversion — S=1.07 across 4 sims, VERY promising
+    "hv_02": 2.00,       # vol regime conditional — S=0.86, F=1.26, best fitness in bot
+    "combo_3s": 2.00,    # 3-signal combos — S=1.15, F=1.29 average
+    "combo_2s": 1.80,    # 2-signal combos — S=1.41, 12% submit rate
+    "hs_01": 2.00,       # -ts_zscore(EV/EBITDA) — S=1.06, getting close
+    "hs_10": 1.80,       # price/book zscore — S=0.90 early
+    "tut_09": 1.50,      # OEY ts_rank — S=0.88, F=0.71 first sim
     # v6.0: Multiplicative combos — data-driven weights from overnight run
     "m7c_05": 0.01,      # DEAD: avg S=0.14 in 7 sims
     "m7c_06": 3.00,      # BEST NEW: avg S=0.81, best F=1.39 — multiplicative × vol_regime
@@ -479,6 +497,8 @@ SIGNAL_CLASS_SETTINGS = {
     "analyst_deep": {"universes": ["TOP3000", "TOP1000"], "neutralizations": ["INDUSTRY", "SUBINDUSTRY"], "decays": [6, 8], "truncations": [0.08]},
     "social_scalar": {"universes": ["TOP3000", "TOP1000"], "neutralizations": ["SUBINDUSTRY", "MARKET"], "decays": [4, 6, 8], "truncations": [0.08]},
     "wild_combos": {"universes": ["TOP3000", "TOP1000"], "neutralizations": ["MARKET", "INDUSTRY", "SUBINDUSTRY"], "decays": [6, 8, 10], "truncations": [0.05, 0.08]},
+    "tutorial_proven": {"universes": ["TOP3000", "TOP1000", "TOP500"], "neutralizations": ["MARKET", "INDUSTRY", "SECTOR"], "decays": [0, 4, 6, 8], "truncations": [0.01, 0.05, 0.08]},
+    "high_sharpe": {"universes": ["TOP3000", "TOP1000", "TOP500", "TOP200"], "neutralizations": ["SUBINDUSTRY", "INDUSTRY", "MARKET"], "decays": [0, 2, 4, 6, 8], "truncations": [0.01, 0.05, 0.08]},
 }
 
 # v5.7: Minimum exploration guarantee per family

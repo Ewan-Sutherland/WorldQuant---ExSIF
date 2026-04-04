@@ -355,7 +355,7 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "rp_06", "expression": "-rank(ts_backfill(rp_css_legal, 60))"},
         {"template_id": "rp_07", "expression": "rank(ts_delta(ts_backfill(rp_ess_product, 60), 10))"},
         {"template_id": "rp_08", "expression": "rank(ts_backfill(rp_nip_earnings, 60) * ts_backfill(rp_ess_earnings, 60))"},
-        {"template_id": "rp_09", "expression": "trade_when(ts_backfill(nws18_event_relevance, 60) > 50, rank(ts_backfill(rp_ess_earnings, 60)), -1)"},
+        {"template_id": "rp_09", "expression": "rank(ts_backfill(rp_ess_earnings, 60)) * rank(ts_backfill(rp_css_earnings, 60))"},
     ],
 
     # OPTIONS ANALYTICS — breakeven & forward price, 74 fields, 0 submitted
@@ -435,6 +435,55 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "wild_05", "expression": "rank(-snt1_d1_earningstorpedo) * rank(ts_mean(rel_ret_comp, 5))"},
         {"template_id": "wild_06", "expression": "rank(ts_backfill(fscore_bfl_surface_accel, 60)) * rank(ts_backfill(implied_volatility_mean_skew_60, 60))"},
         {"template_id": "wild_07", "expression": "rank(correlation_last_30_days_spy - correlation_last_360_days_spy) * rank(ts_rank(operating_income / cap, 252))"},
+    ],
+
+    # v6.2.1: TUTORIAL-PROVEN — expressions directly from WorldQuant's official tutorial
+    "tutorial_proven": [
+        # CLV (Close Location Value) — tutorial says S > 1.4 with volume
+        {"template_id": "tut_01", "expression": "-zscore(((close - low) - (high - close)) / (high - low + 0.001)) * rank(volume)"},
+        # Momentum with reversion dodge — delay 10 days to skip short-term reversion
+        {"template_id": "tut_02", "expression": "ts_delay(ts_delta(close, 250) / ts_delay(close, 250), 10)"},
+        # Count positive return days — completely different signal structure
+        {"template_id": "tut_03", "expression": "rank(ts_sum(returns > 0? 1:0, 252))"},
+        # Positive days + volume condition via trade_when
+        {"template_id": "tut_04", "expression": "trade_when(volume > adv20, ts_sum(returns > 0? 1:0, 250), -1)"},
+        # Buzz vs volume regression — tutorial says "most effective method"
+        {"template_id": "tut_05", "expression": "ts_regression(-scl12_buzz, volume, 250)"},
+        # News conditional momentum/reversion — tutorial answer expression
+        {"template_id": "tut_06", "expression": "rank(ts_sum(vec_avg(nws12_afterhsz_sl), 60)) > 0.5? 1 : rank(-ts_delta(close, 2))"},
+        # Custom cap-group neutralized IV spread — tutorial advanced pattern
+        {"template_id": "tut_07", "expression": "group_neutralize(ts_backfill(implied_volatility_call_120, 60) - ts_backfill(implied_volatility_put_120, 60), bucket(rank(cap), range=\"0.1,1,0.1\"))"},
+        # EV/EBITDA value — tutorial basic pattern
+        {"template_id": "tut_08", "expression": "-rank(enterprise_value / (ebitda + 0.001))"},
+        # OEY with ts_rank — tutorial recommended approach
+        {"template_id": "tut_09", "expression": "ts_rank(operating_income / cap, 250)"},
+    ],
+
+    # v6.2.1: HIGH SHARPE — research-proven S>2.0 patterns we've never templated
+    "high_sharpe": [
+        # -ts_zscore(EV/EBITDA) — research: S=2.58, F=1.70 on TOP3000/SUBINDUSTRY
+        {"template_id": "hs_01", "expression": "-ts_zscore(enterprise_value / (ebitda + 0.001), 63)"},
+        {"template_id": "hs_02", "expression": "-ts_zscore(enterprise_value / (ebitda + 0.001), {n})"},
+        # -rank(ebit/capex) — research: S=2.02, F=2.30 on TOP500
+        {"template_id": "hs_03", "expression": "-rank(ebit / (capex + 0.001))"},
+        {"template_id": "hs_04", "expression": "-group_rank(ebit / (capex + 0.001), industry)"},
+        # hump() wrapped versions — reduces turnover → boosts fitness
+        {"template_id": "hs_05", "expression": "hump(-ts_zscore(enterprise_value / (ebitda + 0.001), 63))"},
+        {"template_id": "hs_06", "expression": "hump(rank(ts_rank(operating_income / cap, 252)))"},
+        {"template_id": "hs_07", "expression": "hump(-rank(ebit / (capex + 0.001)))"},
+        # Simple value ratios that research shows work but we never tried standalone
+        {"template_id": "hs_08", "expression": "-rank(enterprise_value / (sales + 0.001))"},
+        {"template_id": "hs_09", "expression": "rank(ebitda / enterprise_value)"},
+        {"template_id": "hs_10", "expression": "-ts_zscore(close / (bookvalue_ps + 0.001), 63)"},
+        # Gross profit to assets — Novy-Marx factor, use model77 pre-computed ratio
+        {"template_id": "hs_11", "expression": "rank(gross_profit_to_assets_ratio)"},
+        {"template_id": "hs_12", "expression": "ts_rank(gross_profit_to_assets_ratio, 252)"},
+        # FCF yield — free cash flow / market cap
+        {"template_id": "hs_13", "expression": "rank(cashflow_op / cap)"},
+        {"template_id": "hs_14", "expression": "-ts_zscore(cap / (cashflow_op + 0.001), 63)"},
+        # Custom bucket neutralization — tutorial advanced technique, nobody else does this
+        {"template_id": "hs_15", "expression": "group_neutralize(-ts_zscore(enterprise_value / (ebitda + 0.001), 63), bucket(rank(cap), range=\"0.1,1,0.1\"))"},
+        {"template_id": "hs_16", "expression": "group_neutralize(rank(ebitda / enterprise_value), bucket(rank(cap), range=\"0.1,1,0.1\"))"},
     ],
 }
 

@@ -37,7 +37,8 @@ VALID_FIELDS = {
     "cashflow", "cashflow_dividends", "cashflow_fin", "cashflow_invst",
     "cashflow_op", "cogs", "current_ratio", "debt", "debt_lt", "debt_st",
     "depre_amort", "ebit", "ebitda", "employee", "enterprise_value", "eps",
-    "equity", "income", "sales",
+    "equity", "income", "sales", "operating_income",
+    "inventory_turnover", "rd_expense", "retained_earnings", "working_capital", "revenue",
     # Fundamental Scores (model16)
     "fscore_bfl_value", "fscore_bfl_momentum", "fscore_bfl_quality",
     "fscore_bfl_growth", "fscore_bfl_profitability", "fscore_bfl_total",
@@ -185,7 +186,7 @@ VALID_FIELDS.update({
     # Supply chain (pv13)
     "pv13_custretsig_retsig",
     # RavenPack category sentiment
-    "rp_ess_insider", "rp_css_legal", "rp_nip_earnings", "nws18_event_relevance",
+    "rp_ess_insider", "rp_css_legal", "rp_nip_earnings",  # nws18_event_relevance REMOVED — event field
     "rp_css_mna", "rp_ess_mna", "rp_css_revenue", "rp_ess_revenue",
     "rp_css_product", "rp_ess_product", "rp_css_credit",
     "rp_css_dividends", "rp_ess_dividends", "rp_nip_mna",
@@ -258,6 +259,8 @@ BANNED_FIELDS = {
     "fnd6_epsfx",          # event_driven dead
     "fam_earn_surp_pct", "fam_roe_rank",  # event_driven dead
     "scl15_d1_sentiment",  # doesn't exist — not in any dataset
+    "nws18_event_relevance",  # v6.2.1: event field — ts_backfill doesn't support event inputs
+    "gross_profit",        # v6.2.1: NOT a valid WQ field — use gross_profit_to_assets_ratio instead
 }
 
 # v6.2.1: Operators that are inaccessible or broken at base level
@@ -612,25 +615,34 @@ class LLMClient:
         """Try all Gemini keys, then all Groq keys. Returns raw text or None."""
         self._reset_daily_counters()
         now = time.time()
+        # v6.2.1: End of today (UTC) for daily exhaustion marking
+        end_of_day = (int(now // 86400) + 1) * 86400
 
-        # Try each Gemini key — skip rate-limited ones
+        # Try each Gemini key — skip exhausted/rate-limited ones SILENTLY
+        gemini_attempted = 0
         for i, key in enumerate(self.gemini_keys):
-            if self._gemini_calls[i] >= 240:  # 250 RPD limit with buffer
+            if self._gemini_calls[i] >= 18:  # 20 RPD free tier with buffer
                 continue
             if now < self._gemini_rate_limited_until[i]:
-                continue  # still in cooldown for this key
+                continue  # exhausted for today or in cooldown — skip silently
 
+            gemini_attempted += 1
             result = self._call_gemini(key, system_prompt, user_prompt)
             if result is not None:
                 self._gemini_calls[i] += 1
                 return result
             else:
-                # Mark this key as rate-limited for 60s
-                self._gemini_rate_limited_until[i] = now + 60
+                # v6.2.1: Key got 429 — mark exhausted for REST OF DAY, not just 60s
+                self._gemini_rate_limited_until[i] = end_of_day
+                # Only log once per key exhaustion, not every call attempt
+                remaining = sum(1 for j in range(len(self.gemini_keys))
+                              if self._gemini_calls[j] < 18 and now >= self._gemini_rate_limited_until[j])
+                if remaining == 0 and i == len(self.gemini_keys) - 1:
+                    print(f"[LLM] All {len(self.gemini_keys)} Gemini keys exhausted for today")
 
         # Fallback: try each Groq key
         for i, key in enumerate(self.groq_keys):
-            if self._groq_calls[i] >= 950:  # 1000 RPD limit with buffer
+            if self._groq_calls[i] >= 18:  # same free tier limit
                 continue
             if now < self._groq_rate_limited_until[i]:
                 continue
@@ -640,7 +652,7 @@ class LLMClient:
                 self._groq_calls[i] += 1
                 return result
             else:
-                self._groq_rate_limited_until[i] = now + 60
+                self._groq_rate_limited_until[i] = end_of_day
 
         return None
 
@@ -662,8 +674,7 @@ class LLMClient:
             resp = requests.post(url, json=payload, timeout=30)
 
             if resp.status_code == 429:
-                print("[LLM] Gemini rate limited")
-                return None
+                return None  # v6.2.1: rate limit logging handled by generate() — no spam
             if resp.status_code != 200:
                 print(f"[LLM] Gemini error {resp.status_code}: {resp.text[:200]}")
                 return None
@@ -700,8 +711,7 @@ class LLMClient:
             resp = requests.post(url, json=payload, headers=headers, timeout=30)
 
             if resp.status_code == 429:
-                print("[LLM] Groq rate limited")
-                return None
+                return None  # v6.2.1: rate limit logging handled by generate()
             if resp.status_code != 200:
                 print(f"[LLM] Groq error {resp.status_code}: {resp.text[:200]}")
                 return None

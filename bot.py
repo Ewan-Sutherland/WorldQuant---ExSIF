@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import json
 import re
 
 import config
@@ -11,6 +12,7 @@ from models import Run, new_id, utc_now
 from scheduler import Scheduler
 from storage import Storage
 from similarity import SimilarityEngine
+from universe_sweeper import UniverseSweeper
 from brain_client import BrainClient, BrainAPIError
 
 try:
@@ -106,6 +108,9 @@ class AlphaBot:
             self.evolver = None
             print(f"[EVOLVER] Not available: {exc}")
 
+        # v6.2.1: Universe sweeper — test eligible alphas on all universes
+        self.universe_sweeper = UniverseSweeper(storage, client)
+
         # v6.0.1: Warm-start session state from database — persists across restarts & team members
         self._warm_start_from_history()
 
@@ -163,6 +168,33 @@ class AlphaBot:
                 print(f"[WARM_START] Loaded {len(self.rejected_cores)} self-corr rejected cores")
         except Exception as exc:
             print(f"[WARM_START] Failed to load rejected cores: {exc}")
+
+        # 4. Load already-swept expression:universe pairs for universe sweeper
+        try:
+            submitted_rows = self.storage.get_submitted_candidate_rows(limit=500)
+            self.universe_sweeper.load_already_swept(submitted_rows)
+            # Also queue sweeps for any submitted alphas that haven't been swept yet
+            for row in submitted_rows:
+                expr = row.get("expression", "")
+                settings_json = row.get("settings_json", "{}")
+                if isinstance(settings_json, str):
+                    import json as _json
+                    try:
+                        settings = _json.loads(settings_json)
+                    except (ValueError, TypeError):
+                        settings = {}
+                else:
+                    settings = settings_json or {}
+                if expr and settings:
+                    self.universe_sweeper.queue_sweep(
+                        expression=expr,
+                        settings=settings,
+                        family=row.get("family", ""),
+                        template_id=row.get("template_id", ""),
+                        alpha_id=row.get("alpha_id", ""),
+                    )
+        except Exception as exc:
+            print(f"[WARM_START] Failed to init universe sweeper: {exc}")
 
     # =========================================================
     # Main loop
@@ -891,6 +923,14 @@ class AlphaBot:
                         f"  ✅ SUBMITTED — score change: {best['change']:+.0f}\n"
                         f"{'='*60}\n"
                     )
+                    # v6.2.1: Queue universe sweep for this alpha
+                    self.universe_sweeper.queue_sweep(
+                        expression=expression,
+                        settings=json.loads(best.get("settings_json", "{}")) if isinstance(best.get("settings_json"), str) else best.get("settings_json", {}),
+                        family=family,
+                        template_id=candidate_row.get("template_id", ""),
+                        alpha_id=best.get("alpha_id", ""),
+                    )
                 elif accepted is False:
                     fail_reason = sub_result.get("_fail_reason", "unknown")
                     self.storage.insert_submission(
@@ -932,6 +972,14 @@ class AlphaBot:
                     f"  📋 STAGED in ready_alphas — score change={best['change']:+.0f} "
                     f"(submit manually on BRAIN website)\n"
                     f"{'='*60}\n"
+                )
+                # v6.2.1: Queue universe sweep for this alpha
+                self.universe_sweeper.queue_sweep(
+                    expression=expression,
+                    settings=json.loads(best.get("settings_json", "{}")) if isinstance(best.get("settings_json"), str) else best.get("settings_json", {}),
+                    family=family,
+                    template_id=candidate_row.get("template_id", ""),
+                    alpha_id=best.get("alpha_id", ""),
                 )
 
         else:
@@ -2036,6 +2084,56 @@ class AlphaBot:
         attempts = 0
         max_attempts = 12
 
+        # v6.2.1: Universe sweeps — max 1 per tick to leave capacity for exploration
+        sweep_submitted = 0
+        sweep_max_per_tick = 1
+        while self.scheduler.has_capacity() and self.universe_sweeper.pending > 0 and sweep_submitted < sweep_max_per_tick:
+            sweep = self.universe_sweeper.try_sweep()
+            if sweep is None:
+                break
+            try:
+                from canonicalize import canonicalize_expression, hash_candidate
+                from models import Candidate, SimulationSettings
+
+                settings = SimulationSettings(**sweep["settings"])
+                canon = canonicalize_expression(sweep["expression"])
+                expr_hash = hash_candidate(canon, settings.to_dict())
+
+                # Skip if already tested with these exact settings
+                if self.storage.candidate_exists(expr_hash):
+                    continue
+
+                cand = Candidate.create(
+                    expression=sweep["expression"],
+                    canonical_expression=canon,
+                    expression_hash=expr_hash,
+                    template_id=sweep.get("template_id", "sweep"),
+                    family=sweep.get("family", "sweep"),
+                    fields=[],
+                    params={},
+                    settings=settings,
+                )
+                self.storage.insert_candidate(cand)
+                run = Run.create(candidate_id=cand.candidate_id, status="pending")
+                self.storage.insert_run(run)
+
+                sim_id = self.client.submit_simulation(
+                    cand.expression, cand.settings.to_dict()
+                )
+                self.storage.update_run(
+                    run.run_id, sim_id=sim_id, status="submitted", submitted_at=utc_now()
+                )
+                self.scheduler.add(sim_id, run.run_id)
+                sweep_submitted += 1
+                print(
+                    f"[SWEEP_SUBMITTED] run_id={run.run_id} universe={sweep['settings']['universe']} "
+                    f"neut={sweep['settings']['neutralization']} decay={sweep['settings']['decay']} "
+                    f"family={sweep.get('family', '')} expr={sweep['expression'][:60]}..."
+                )
+            except Exception as exc:
+                print(f"[SWEEP_ERROR] {exc}")
+                break
+
         while self.scheduler.has_capacity() and attempts < max_attempts:
             attempts += 1
 
@@ -2299,6 +2397,10 @@ class AlphaBot:
         missing = all_productive - submitted_families
         if missing:
             print(f"  diversity_gaps={sorted(missing)} — boost these for portfolio diversity")
+
+        # v6.2.1: Universe sweep stats
+        if self.universe_sweeper:
+            print(f"  universe_sweeps_pending={self.universe_sweeper.pending} total_swept={self.universe_sweeper.total_sweeps}")
 
         # v5.5: Settings performance report
         settings_bias = self._settings_bias_map()
