@@ -175,7 +175,8 @@ class AlphaBot:
             self.universe_sweeper.load_already_swept(submitted_rows)
             # Also queue sweeps for any submitted alphas that haven't been swept yet
             for row in submitted_rows:
-                expr = row.get("expression", "")
+                # RPC returns canonical_expression, not expression
+                expr = row.get("canonical_expression", "") or row.get("expression", "")
                 settings_json = row.get("settings_json", "{}")
                 if isinstance(settings_json, str):
                     import json as _json
@@ -469,12 +470,14 @@ class AlphaBot:
 
         # v6.2: Don't queue refinement for cores already rejected by WQ self-correlation
         # or cores that produce negative score changes
+        # v6.2.1: EXCEPT sweep candidates — different universes have different correlations
         candidate_row_check = self.storage.get_candidate_by_id(candidate_id)
         if candidate_row_check:
+            is_sweep = str(candidate_row_check.get("template_id", "")).startswith("sweep_")
             core = self._extract_core_signal(candidate_row_check.get("canonical_expression", ""))
-            if core and core in self.rejected_cores:
+            if core and core in self.rejected_cores and not is_sweep:
                 return
-            if core and core in self._score_negative_cores:
+            if core and core in self._score_negative_cores and not is_sweep:
                 return
 
         # v6.1: Eligible alphas get settings-only refinement to find optimal version
@@ -680,8 +683,9 @@ class AlphaBot:
         core = self._extract_core_signal(expression)
         family = candidate_row.get("family", "")
 
-        # Skip if core already rejected
-        if core and core in self.rejected_cores:
+        # Skip if core already rejected — EXCEPT sweep candidates (different universe = different correlation)
+        is_sweep = str(candidate_row.get("template_id", "")).startswith("sweep_")
+        if core and core in self.rejected_cores and not is_sweep:
             print(
                 f"[OPTIMIZE_SKIP_CORR] run_id={run_id} "
                 f"core='{core[:60]}' — already rejected by WQ"
@@ -1939,13 +1943,16 @@ class AlphaBot:
                     continue
 
                 # v6.2: Skip if core already rejected by WQ self-correlation
-                if core and core in self.rejected_cores:
+                # v6.2.1: EXCEPT sweep candidates — different universes may pass
+                is_sweep_refine = str(refinement_row.get("template_id", "")).startswith("sweep_")
+                if core and core in self.rejected_cores and not is_sweep_refine:
                     self.storage.mark_refinement_consumed(base_candidate_id)
                     print(f"[REFINE_SKIP_CORR] core='{core[:60]}' — already rejected by WQ, skipping refinement")
                     continue
 
                 # v6.2: Skip if core already produced negative score changes
-                if core and core in self._score_negative_cores:
+                # v6.2.1: EXCEPT sweep candidates — different universes may have positive score change
+                if core and core in self._score_negative_cores and not is_sweep_refine:
                     self.storage.mark_refinement_consumed(base_candidate_id)
                     print(f"[REFINE_SKIP_SCORE] core='{core[:60]}' — negative score change, skipping refinement")
                     continue

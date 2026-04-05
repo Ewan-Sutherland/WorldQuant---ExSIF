@@ -198,7 +198,8 @@ class UniverseSweeper:
         submitted so we don't re-sweep them.
         """
         for alpha in submitted_alphas:
-            expr = alpha.get("expression", "")
+            # RPC returns canonical_expression, not expression
+            expr = alpha.get("canonical_expression", "") or alpha.get("expression", "")
             settings_json = alpha.get("settings_json", "{}")
             if isinstance(settings_json, str):
                 try:
@@ -207,6 +208,9 @@ class UniverseSweeper:
                     settings = {}
             else:
                 settings = settings_json or {}
+
+            if not expr or not settings:
+                continue
 
             universe = settings.get("universe", "TOP3000")
             neut = settings.get("neutralization", "MARKET")
