@@ -485,6 +485,82 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "hs_15", "expression": "group_neutralize(-ts_zscore(enterprise_value / (ebitda + 0.001), 63), bucket(rank(cap), range=\"0.1,1,0.1\"))"},
         {"template_id": "hs_16", "expression": "group_neutralize(rank(ebitda / enterprise_value), bucket(rank(cap), range=\"0.1,1,0.1\"))"},
     ],
+    # v6.2.1: Financial statement (fn_) fields — massive portfolio diversity (+175, +198 score change)
+    # These raw signals fail Sharpe/Fitness alone but wrapped properly become uncorrelated submissions
+    "fn_financial": [
+        # Fair value liabilities — the +175 score change signal
+        {"template_id": "fn_01", "expression": "rank(-ts_rank(fn_liab_fair_val_l1_a, {n}))"},
+        {"template_id": "fn_02", "expression": "rank(-ts_rank(fn_liab_fair_val_l1_a, {n})) + rank(-returns)"},
+        {"template_id": "fn_03", "expression": "rank(-ts_rank(fn_liab_fair_val_l1_a, {n})) * rank(adv20)"},
+        {"template_id": "fn_04", "expression": "group_rank(-ts_rank(fn_liab_fair_val_l1_a, {n}), industry)"},
+        {"template_id": "fn_05", "expression": "rank(-ts_rank(fn_liab_fair_val_l1_a, {n})) + rank(ts_rank(operating_income / cap, 252))"},
+        # FX transaction — the +198 score change signal
+        {"template_id": "fn_06", "expression": "rank(ts_mean(fn_oth_income_loss_fx_transaction_and_tax_translation_adj_a, {n}))"},
+        {"template_id": "fn_07", "expression": "rank(ts_mean(fn_oth_income_loss_fx_transaction_and_tax_translation_adj_a, {n})) + rank(-returns)"},
+        {"template_id": "fn_08", "expression": "rank(ts_mean(fn_oth_income_loss_fx_transaction_and_tax_translation_adj_a, {n})) * rank(adv20)"},
+        {"template_id": "fn_09", "expression": "group_rank(ts_mean(fn_oth_income_loss_fx_transaction_and_tax_translation_adj_a, {n}), industry)"},
+        {"template_id": "fn_10", "expression": "rank(ts_mean(fn_oth_income_loss_fx_transaction_and_tax_translation_adj_a, {n})) + rank(ts_rank(operating_income / cap, 252))"},
+        # Fair value assets — opposite side of the balance sheet
+        {"template_id": "fn_11", "expression": "rank(ts_rank(fn_assets_fair_val_l1_a, {n}))"},
+        {"template_id": "fn_12", "expression": "rank(ts_rank(fn_assets_fair_val_l1_a, {n})) + rank(-returns)"},
+        # Debt instruments
+        {"template_id": "fn_13", "expression": "rank(-ts_rank(fn_debt_instrument_carrying_amount_a / (cap + 0.001), {n}))"},
+        {"template_id": "fn_14", "expression": "rank(-ts_rank(fn_debt_instrument_carrying_amount_a / (cap + 0.001), {n})) + rank(-returns)"},
+        # Share-based compensation (employee stock options signal)
+        {"template_id": "fn_15", "expression": "rank(-ts_rank(fn_allocated_share_based_compensation_expense_a / (cap + 0.001), {n}))"},
+        {"template_id": "fn_16", "expression": "rank(fn_comprehensive_income_net_of_tax_a / (cap + 0.001))"},
+        # FX accumulation
+        {"template_id": "fn_17", "expression": "rank(fn_accum_oth_income_loss_fx_adj_net_of_tax_a / (cap + 0.001))"},
+        {"template_id": "fn_18", "expression": "rank(fn_accum_oth_income_loss_fx_adj_net_of_tax_a / (cap + 0.001)) + rank(-returns)"},
+    ],
+    # v6.2.1: Simple ratios — liabilities/assets gave +175 score change with 1 operator!
+    # Dead-simple balance sheet ratios are massively portfolio-diverse
+    "simple_ratio": [
+        # Balance sheet ratios
+        {"template_id": "sr_01", "expression": "liabilities / assets"},
+        {"template_id": "sr_02", "expression": "rank(liabilities / assets)"},
+        {"template_id": "sr_03", "expression": "rank(liabilities / assets) + rank(-returns)"},
+        {"template_id": "sr_04", "expression": "rank(liabilities / assets) * rank(adv20)"},
+        {"template_id": "sr_05", "expression": "group_rank(liabilities / assets, industry)"},
+        {"template_id": "sr_06", "expression": "rank(debt / assets)"},
+        {"template_id": "sr_07", "expression": "rank(debt / assets) + rank(-returns)"},
+        {"template_id": "sr_08", "expression": "rank(equity / assets)"},
+        {"template_id": "sr_09", "expression": "rank(equity / liabilities)"},
+        {"template_id": "sr_10", "expression": "rank(cashflow_op / assets)"},
+        {"template_id": "sr_11", "expression": "rank(cashflow_op / liabilities)"},
+        {"template_id": "sr_12", "expression": "rank(operating_income / assets)"},
+        {"template_id": "sr_13", "expression": "rank(ebitda / assets)"},
+        {"template_id": "sr_14", "expression": "rank(sales / liabilities)"},
+        {"template_id": "sr_15", "expression": "rank(net_income / assets)"},
+        {"template_id": "sr_16", "expression": "rank(current_assets / current_liabilities)"},
+        {"template_id": "sr_17", "expression": "rank(retained_earnings / assets)"},
+        {"template_id": "sr_18", "expression": "rank(working_capital / assets)"},
+        # Inverted ratios (what's cheap relative to fundamentals)
+        {"template_id": "sr_19", "expression": "rank(assets / cap)"},
+        {"template_id": "sr_20", "expression": "rank(equity / cap)"},
+        {"template_id": "sr_21", "expression": "rank(sales / cap)"},
+        {"template_id": "sr_22", "expression": "rank(ebitda / cap)"},
+        # Time-series rank versions (detect regime changes)
+        {"template_id": "sr_23", "expression": "rank(ts_rank(liabilities / assets, 252))"},
+        {"template_id": "sr_24", "expression": "rank(ts_rank(debt / assets, 252))"},
+        {"template_id": "sr_25", "expression": "rank(ts_rank(equity / assets, 252))"},
+        {"template_id": "sr_26", "expression": "rank(ts_zscore(liabilities / assets, 60))"},
+    ],
+    # v6.2.1: Fundamental / volatility ratio signals — the +152 score change pattern
+    "fundamental_vol": [
+        {"template_id": "fv_02", "expression": "rank(ts_rank(operating_income / (parkinson_volatility_180 + 0.001), 252))"},
+        {"template_id": "fv_03", "expression": "rank(ts_rank(operating_income / (parkinson_volatility_180 + 0.001), 252)) + rank(-returns)"},
+        {"template_id": "fv_04", "expression": "group_rank(operating_income / (parkinson_volatility_180 + 0.001), industry)"},
+        {"template_id": "fv_05", "expression": "rank(operating_income / (parkinson_volatility_120 + 0.001))"},
+        {"template_id": "fv_06", "expression": "rank(ebitda / (parkinson_volatility_180 + 0.001))"},
+        {"template_id": "fv_07", "expression": "rank(cashflow_op / (parkinson_volatility_120 + 0.001))"},
+        {"template_id": "fv_08", "expression": "rank(sales / (parkinson_volatility_180 + 0.001))"},
+        {"template_id": "fv_09", "expression": "rank(ts_rank(ebitda / (parkinson_volatility_180 + 0.001), 252)) + rank(-returns)"},
+        {"template_id": "fv_10", "expression": "rank(operating_income / (parkinson_volatility_180 + 0.001)) * rank(adv20)"},
+        # Normalized by cap for cross-sectional comparability
+        {"template_id": "fv_11", "expression": "rank(ts_rank(operating_income / cap, 252) * (1 / (parkinson_volatility_180 + 0.001)))"},
+        {"template_id": "fv_12", "expression": "rank(ts_rank(operating_income / cap, 252)) * rank(1 / (parkinson_volatility_180 + 0.001))"},
+    ],
 }
 
 # ── Field lists ───────────────────────────────────────────────────────
@@ -615,4 +691,7 @@ DATASET_NEUTRALIZATION = {
     "risk_beta": ["MARKET", "INDUSTRY"],
     "combo_factor": ["MARKET", "INDUSTRY", "SUBINDUSTRY"],
     "wq_proven": ["INDUSTRY", "SUBINDUSTRY", "SECTOR", "MARKET"],
+    "fn_financial": ["INDUSTRY", "SUBINDUSTRY", "MARKET"],
+    "fundamental_vol": ["INDUSTRY", "SUBINDUSTRY", "MARKET"],
+    "simple_ratio": ["SUBINDUSTRY", "INDUSTRY", "MARKET", "SECTOR"],
 }

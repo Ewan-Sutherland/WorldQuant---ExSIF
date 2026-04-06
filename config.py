@@ -179,7 +179,7 @@ FAMILY_BASE_WEIGHTS = {
     "conditional": 0.10,
     "vol_adjusted": 0.08,
     # v6.2.1: PORTFOLIO-ADDITIVE — boost genuinely different data categories
-    "fundamental_value": 0.50,  # v6.2.1: was 1.00 — saturated with fundamentals
+    "fundamental_value": 3.00,  # v6.2.1: operating_income/parkinson_vol showed +152 score change — BOOST
     "quality_trend": 0.60,
     "fundamental_scores": 0.10, # v6.2.1: 11 sims, S=-0.07 — DEAD
     "earnings_momentum": 1.80,  # v6.2.1: was 1.20 — some signal, underexplored standalone
@@ -212,6 +212,10 @@ FAMILY_BASE_WEIGHTS = {
     "wild_combos": 0.10,        # v6.2.1: 7 sims, S=-0.23 — DEAD
     "tutorial_proven": 3.00,    # v6.2.1: expressions from WQ official tutorial
     "high_sharpe": 5.00,        # v6.2.1: research-proven S>2.0 patterns — HIGHEST PRIORITY
+    # v6.2.1: fn_ financial statement fields — MASSIVE portfolio diversity (+175, +198 score change)
+    "fn_financial": 5.00,       # fn_liab_fair_val, fn_oth_income — totally uncorrelated with portfolio
+    "simple_ratio": 5.00,       # liabilities/assets gave +175! Dead-simple ratios = max diversity
+    "fundamental_vol": 3.00,    # operating_income/parkinson_vol showed +152 score change
 }
 
 TEMPLATE_BASE_WEIGHTS = {
@@ -456,7 +460,7 @@ EVOLVE_GENERATION_PROBABILITY = 0.10
 # 85% of sims use these profiles, 15% explore full setting space.
 SIGNAL_CLASS_SETTINGS = {
     # Fundamental — quarterly data, long lookback, subindustry neutral
-    "fundamental_value": {"universes": ["TOP3000"], "neutralizations": ["SUBINDUSTRY"], "decays": [0, 2, 4], "truncations": [0.05, 0.08]},
+    "fundamental_value": {"universes": ["TOP3000", "TOP1000", "TOP500", "TOP200"], "neutralizations": ["SUBINDUSTRY", "INDUSTRY", "MARKET"], "decays": [0, 2, 4, 6, 8, 10], "truncations": [0.05, 0.08, 0.10]},
     "quality_trend": {"universes": ["TOP3000"], "neutralizations": ["SUBINDUSTRY"], "decays": [0, 2, 4], "truncations": [0.05, 0.08]},
     "size_value": {"universes": ["TOP3000"], "neutralizations": ["SUBINDUSTRY"], "decays": [0, 2, 4], "truncations": [0.05, 0.08]},
     # Fundamental scores — mid universe, some smoothing
@@ -499,6 +503,10 @@ SIGNAL_CLASS_SETTINGS = {
     "wild_combos": {"universes": ["TOP3000", "TOP1000"], "neutralizations": ["MARKET", "INDUSTRY", "SUBINDUSTRY"], "decays": [6, 8, 10], "truncations": [0.05, 0.08]},
     "tutorial_proven": {"universes": ["TOP3000", "TOP1000", "TOP500"], "neutralizations": ["MARKET", "INDUSTRY", "SECTOR"], "decays": [0, 4, 6, 8], "truncations": [0.01, 0.05, 0.08]},
     "high_sharpe": {"universes": ["TOP3000", "TOP1000", "TOP500", "TOP200"], "neutralizations": ["SUBINDUSTRY", "INDUSTRY", "MARKET"], "decays": [0, 2, 4, 6, 8], "truncations": [0.01, 0.05, 0.08]},
+    # v6.2.1: fn_ financial statement fields — +175, +198 score change, totally uncorrelated
+    "fn_financial": {"universes": ["TOP3000", "TOP1000", "TOP500", "TOP200"], "neutralizations": ["SUBINDUSTRY", "INDUSTRY", "MARKET", "SECTOR"], "decays": [0, 2, 4, 6, 8, 10, 12], "truncations": [0.01, 0.05, 0.08, 0.10]},
+    "simple_ratio": {"universes": ["TOP3000", "TOP1000", "TOP500", "TOP200"], "neutralizations": ["SUBINDUSTRY", "INDUSTRY", "MARKET", "SECTOR"], "decays": [0, 2, 4, 6, 8, 10, 12], "truncations": [0.01, 0.05, 0.08, 0.10]},
+    "fundamental_vol": {"universes": ["TOP3000", "TOP1000", "TOP500", "TOP200"], "neutralizations": ["SUBINDUSTRY", "INDUSTRY", "MARKET"], "decays": [0, 2, 4, 6, 8, 10], "truncations": [0.05, 0.08, 0.10]},
 }
 
 # v5.7: Minimum exploration guarantee per family

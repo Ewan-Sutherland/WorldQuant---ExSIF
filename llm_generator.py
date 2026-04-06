@@ -163,6 +163,27 @@ VALID_FIELDS.update({
     "fn_liab_fair_val_a", "fn_liab_fair_val_q",
 })
 
+# v6.2.1: fn_ financial statement fields — massive portfolio diversity (+175, +198 score change)
+VALID_FIELDS.update({
+    "fn_oth_income_loss_fx_transaction_and_tax_translation_adj_a",
+    "fn_oth_income_loss_fx_transaction_and_tax_translation_adj_q",
+    "fn_accum_oth_income_loss_fx_adj_net_of_tax_a",
+    "fn_accum_oth_income_loss_fx_adj_net_of_tax_q",
+    "fn_assets_fair_val_l1_a", "fn_assets_fair_val_l1_q",
+    "fn_assets_fair_val_l2_a", "fn_assets_fair_val_l2_q",
+    "fn_debt_instrument_carrying_amount_a", "fn_debt_instrument_carrying_amount_q",
+    "fn_allocated_share_based_compensation_expense_a",
+    "fn_comprehensive_income_net_of_tax_a", "fn_comprehensive_income_net_of_tax_q",
+    "fn_accum_oth_income_loss_net_of_tax_a",
+    "fn_eff_income_tax_rate_continuing_operations_a",
+    "fn_income_tax_expense_a",
+    "fn_def_tax_assets_liab_net_a",
+    "fn_liab_fair_val_l2_a", "fn_liab_fair_val_l3_a",
+    "parkinson_volatility_120", "parkinson_volatility_150",
+    "parkinson_volatility_180", "parkinson_volatility_60",
+    "parkinson_volatility_90", "parkinson_volatility_30",
+})
+
 # v5.9: Additional analyst estimate fields
 VALID_FIELDS.update({
     "est_eps", "est_epsr", "est_fcf", "est_fcf_ps", "est_ptp",
