@@ -112,6 +112,8 @@ class AlphaBot:
         self.total_completions = 0
         self._total_eligible = 0
         self._total_submitted = 0
+        # v7.0: Track parent→child for refinement queue consumption
+        self._refinement_lineage: dict[str, str] = {}  # child_candidate_id → parent_candidate_id
 
         # v6.1: Evolutionary LLM mutation — evolves top performers
         try:
@@ -216,6 +218,28 @@ class AlphaBot:
         except Exception as exc:
             print(f"[WARM_START] Failed to init universe sweeper: {exc}")
 
+        # 5. Restore refinement counters from last shutdown
+        try:
+            bot_state = self.storage.get_bot_state()
+            if bot_state:
+                snapshot = bot_state.get("config_snapshot")
+                if snapshot:
+                    import json as _json
+                    counters = _json.loads(snapshot) if isinstance(snapshot, str) else (snapshot or {})
+                    if counters.get("refinement_attempts_by_base"):
+                        self.refinement_attempts_by_base = counters["refinement_attempts_by_base"]
+                    if counters.get("refinement_attempts_by_core"):
+                        self.refinement_attempts_by_core = counters["refinement_attempts_by_core"]
+                    if counters.get("core_signal_exhausted"):
+                        self.core_signal_exhausted = counters["core_signal_exhausted"]
+                    if counters.get("family_template_exhausted"):
+                        self.family_template_exhausted = counters["family_template_exhausted"]
+                    total_restored = sum(len(v) for v in counters.values() if isinstance(v, dict))
+                    if total_restored:
+                        print(f"[WARM_START] Restored {total_restored} refinement counter entries from last session")
+        except Exception as exc:
+            print(f"[WARM_START] Failed to restore refinement counters: {exc}")
+
     # =========================================================
     # Main loop
     # =========================================================
@@ -224,7 +248,31 @@ class AlphaBot:
         self.client.ensure_session()
         self._poll_running()
         self._check_stall()   # v6.2.1: stall detection
+        self._maybe_run_submit_pipeline()  # v7.0: scheduled auto-submission
         self._fill_capacity()
+
+    def _maybe_run_submit_pipeline(self) -> None:
+        """v7.0: Run submission pipeline if it's this bot's scheduled window."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+
+        # Only check once per hour (avoid re-running every tick)
+        if hasattr(self, "_last_submit_hour") and self._last_submit_hour == now.hour:
+            return
+
+        try:
+            from submit_pipeline import should_submit_now, SubmitPipeline
+            if should_submit_now(self.storage.owner):
+                self._last_submit_hour = now.hour
+                print(f"\n[SUBMIT_PIPELINE] Scheduled submission window — starting pipeline...")
+                pipeline = SubmitPipeline(self.storage, self.client, config)
+                result = pipeline.run()
+                print(f"[SUBMIT_PIPELINE] Done: {result}")
+            else:
+                self._last_submit_hour = now.hour
+        except Exception as exc:
+            self._last_submit_hour = now.hour
+            print(f"[SUBMIT_PIPELINE_ERROR] {exc}")
 
     # =========================================================
     # v6.2.1: Stall detection + escalating recovery
@@ -621,6 +669,16 @@ class AlphaBot:
                 f"[QUEUED_REFINEMENT] run_id={run_id} candidate_id={candidate_id} "
                 f"priority={priority:.3f} reason={metrics.fail_reason} stage={source_stage}"
             )
+            # v7.0: If this candidate was a refinement child, consume the parent
+            # This breaks the feedback loop where parent + child both sit in queue
+            parent_id = self._refinement_lineage.pop(candidate_id, None)
+            if parent_id:
+                try:
+                    self.storage.mark_refinement_consumed(parent_id)
+                    self._active_refinement_ids.discard(parent_id)
+                    print(f"[PARENT_CONSUMED] child={candidate_id[:20]} replaced parent={parent_id[:20]} in queue")
+                except Exception:
+                    pass
 
     def _attempt_submission(self, candidate_id: str, run_id: str, result: dict) -> None:
         """
@@ -961,16 +1019,28 @@ class AlphaBot:
                     generated += 1
 
         # ── Step 3: Check before-after for ALL viable variants ──
+        # v7.0: Retry up to 3 times per variant — timeouts are common on WQ API
         print(f"\n  Checking merged performance for {len(variants)} viable variant(s)...")
 
         for v in variants:
-            try:
-                perf = self.client.check_before_after_performance(
-                    v["alpha_id"], competition_id=config.IQC_COMPETITION_ID,
-                )
-            except Exception as exc:
-                print(f"  ⚠️ Before-after timed out for {v['desc']}: {exc}")
-                perf = {"_score_change": None, "_score_before": None, "_score_after": None}
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    perf = self.client.check_before_after_performance(
+                        v["alpha_id"], competition_id=config.IQC_COMPETITION_ID,
+                    )
+                    if perf.get("_score_change") is not None:
+                        break  # Got a real result
+                    if attempt < max_retries - 1:
+                        import time
+                        time.sleep(5)
+                except Exception as exc:
+                    if attempt < max_retries - 1:
+                        import time
+                        time.sleep(5)
+                    else:
+                        print(f"  ⚠️ Before-after failed after {max_retries} attempts for {v['desc']}: {exc}")
+                        perf = {"_score_change": None, "_score_before": None, "_score_after": None}
             v["change"] = perf.get("_score_change")
             v["before"] = perf.get("_score_before")
             v["after"] = perf.get("_score_after")
@@ -1081,9 +1151,14 @@ class AlphaBot:
                 )
 
         else:
-            # No positive change — stage best unknown if any
+            # No positive change found
             unknown = [v for v in variants if v["change"] is None]
+            negative = [v for v in variants if v["change"] is not None and v["change"] < 0]
+
             if unknown:
+                # v7.0: Stage unknowns with 'unverified' status — separate from confirmed positives.
+                # Query ready_alphas WHERE status='ready' for your submit list.
+                # Query ready_alphas WHERE status='unverified' if you want to manually check these.
                 best_unk = max(unknown, key=lambda v: v["sharpe"])
                 self.storage.insert_ready_alpha(
                     candidate_id=best_unk["candidate_id"],
@@ -1100,16 +1175,17 @@ class AlphaBot:
                     score_after=None,
                     score_change=None,
                     settings_json=best_unk.get("settings_json", "{}"),
-                    variant_desc=best_unk["desc"] + " (perf_unknown)",
+                    variant_desc=best_unk["desc"] + " (unverified)",
+                    status="unverified",
                 )
                 print(
-                    f"\n  ⚠️ No confirmed positive change. Best staged in ready_alphas "
-                    f"for manual review.\n"
+                    f"\n  ⚠️ Before-after unavailable after retries for {len(unknown)} variant(s). "
+                    f"Staged as 'unverified' (best S={best_unk['sharpe']:.2f} F={best_unk['fitness']:.2f}).\n"
                     f"{'='*60}\n"
                 )
-            else:
+            elif negative:
                 print(
-                    f"\n  📉 ALL variants would hurt score — skipping.\n"
+                    f"\n  📉 ALL {len(negative)} variants would hurt score — skipping.\n"
                     f"{'='*60}\n"
                 )
                 # v6.2: Block further refinement of this core — it hurts the portfolio
@@ -1925,6 +2001,22 @@ class AlphaBot:
         }
         underexplored = sorted(all_categories - submitted_categories)
 
+        # v7.0: Remove dead/blocked families from LLM exploration targets
+        dead_families = set()
+        try:
+            if self.team_weights:
+                dead_families = self.team_weights.get_dead_families()
+        except Exception:
+            pass
+        # Map dead family names to LLM category names
+        dead_category_map = {
+            "model77_anomaly": "model77", "model77_combo": "model77",
+            "relationship": "relationship", "risk_beta": "risk_beta",
+            "model_data": "model_data", "event_driven": "event_driven",
+        }
+        dead_categories = {dead_category_map.get(f, f) for f in dead_families}
+        underexplored = [c for c in underexplored if c not in dead_categories]
+
         # Get expression from LLM
         expr = self.llm_generator.get_expression(
             submitted_exprs=submitted_exprs,
@@ -2217,8 +2309,9 @@ class AlphaBot:
                         )
                     continue
 
-                # Don't consume base — let it be retried until attempts exhausted
+                # v7.0: Record lineage — if child becomes a near-passer, parent gets consumed
                 self._remember_local_refinement(base_candidate_id, candidate.expression_hash)
+                self._refinement_lineage[candidate.candidate_id] = base_candidate_id
                 return candidate
 
             fresh = self._fresh_candidate()

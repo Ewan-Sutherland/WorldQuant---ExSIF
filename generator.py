@@ -385,10 +385,20 @@ class AlphaGenerator:
             ordered = [f for f in config.DEFAULT_FAMILY_ORDER if f in TEMPLATE_LIBRARY]
             fams = ordered + [f for f in fams if f not in ordered]
 
+        # v7.0: Hard-block families that need data this bot doesn't have
+        try:
+            from datasets import get_blocked_families
+            blocked = get_blocked_families()
+        except Exception:
+            blocked = set()
+
         config_weights = getattr(config, "FAMILY_BASE_WEIGHTS", {})
         weights = []
 
         for fam in fams:
+            if fam in blocked:
+                weights.append(0.0)
+                continue
             base = DEFAULT_BASE_FAMILY_WEIGHTS.get(fam, 1.0)
             if fam in config_weights:
                 base *= float(config_weights[fam])

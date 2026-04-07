@@ -25,13 +25,13 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 # How many own sims before fully trusting own data over team
-RAMP_SIMS = 50
+RAMP_SIMS = 20
 
 # Floor weight — even consensus-dead families keep this minimum
-FLOOR_WEIGHT = 0.05
+FLOOR_WEIGHT = 0.03
 
 # Consensus dead threshold
-CONSENSUS_DEAD_WEIGHT = 0.08
+CONSENSUS_DEAD_WEIGHT = 0.04
 
 # Cache TTL — don't re-query team stats more than once per 5 minutes
 CACHE_TTL_SECONDS = 300
@@ -234,3 +234,30 @@ class TeamWeights:
         """Force re-fetch on next call."""
         self._cache.clear()
         self._cache_time = 0
+
+    def get_dead_families(self) -> set[str]:
+        """Return families that the team has consensus-proven dead.
+        
+        Used by LLM generator to avoid generating expressions in dead families.
+        Also includes data-blocked families.
+        """
+        dead = set()
+        try:
+            from datasets import get_blocked_families
+            dead.update(get_blocked_families())
+        except Exception:
+            pass
+
+        try:
+            team_rows = self._fetch_team_aggregate("family")
+            for row in team_rows:
+                if bool(row.get("consensus_dead", False)):
+                    dead.add(row["stat_key"])
+                # Also flag families with very low sharpe across significant sims
+                total = int(row.get("total_runs") or 0)
+                avg_sharpe = float(row.get("weighted_avg_sharpe") or 0)
+                if total >= 15 and avg_sharpe < 0.10:
+                    dead.add(row["stat_key"])
+        except Exception:
+            pass
+        return dead

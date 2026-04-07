@@ -100,6 +100,39 @@ class UniverseSweeper:
         Queue an eligible alpha for testing on all untested universe+settings combos.
         Returns number of sweep jobs queued.
         """
+        # v7.0: Validate expression fields against this bot's dataset
+        # Prevents sweeping expressions that use fields from other teammates' datasets
+        try:
+            from datasets import get_all_valid_fields
+            valid = get_all_valid_fields()
+            # Extract field-like tokens from expression (lowercase words without parens)
+            import re
+            tokens = set(re.findall(r'[a-z][a-z0-9_]+', expression.lower()))
+            # Known operators/keywords to skip
+            operators = {
+                'rank', 'group_rank', 'ts_mean', 'ts_std_dev', 'ts_zscore', 'ts_rank',
+                'ts_delta', 'ts_decay_linear', 'ts_corr', 'ts_sum', 'ts_backfill',
+                'ts_regression', 'ts_step', 'ts_delay', 'ts_scale', 'ts_arg_min',
+                'ts_arg_max', 'ts_covariance', 'ts_product', 'ts_count_nans',
+                'ts_quantile', 'ts_av_diff', 'trade_when', 'if_else',
+                'abs', 'log', 'sign', 'max', 'min', 'power', 'sqrt',
+                'is_nan', 'bucket', 'densify', 'winsorize', 'normalize',
+                'group_neutralize', 'group_zscore', 'group_scale', 'group_backfill',
+                'group_mean', 'scale', 'quantile', 'zscore',
+                'vec_avg', 'vec_sum', 'signed_power', 'inverse', 'reverse', 'hump',
+                'kth_element', 'range', 'true', 'false',
+                'industry', 'subindustry', 'sector', 'market', 'exchange',
+            }
+            field_tokens = tokens - operators
+            # Check for fields not in our valid set
+            valid_lower = {f.lower() for f in valid}
+            missing = [t for t in field_tokens if t not in valid_lower and len(t) > 3]
+            if missing:
+                print(f"[SWEEP_FIELD_BLOCK] expression uses fields not in dataset: {missing[:3]} — skipping sweep")
+                return 0
+        except Exception:
+            pass  # If validation fails, allow sweep (better to try than block everything)
+
         original_universe = settings.get("universe", "TOP3000")
         original_neut = settings.get("neutralization", "MARKET")
         original_decay = int(settings.get("decay", 4))

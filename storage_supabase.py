@@ -675,7 +675,7 @@ class Storage:
     def insert_ready_alpha(self, *, candidate_id, run_id, alpha_id, expression,
                            core_signal, family, template_id, sharpe, fitness,
                            turnover, score_before, score_after, score_change,
-                           settings_json, variant_desc):
+                           settings_json, variant_desc, status="ready"):
         """v6.2: Stage optimised alpha for manual submission."""
         self._post("ready_alphas", {
             "candidate_id": candidate_id,
@@ -693,7 +693,7 @@ class Storage:
             "score_change": score_change,
             "settings_json": settings_json,
             "variant_desc": variant_desc,
-            "status": "ready",
+            "status": status,
             "owner": self.owner,
         })
 
@@ -706,6 +706,7 @@ class Storage:
         completion_count: int = 0,
         interrupted_refinement_ids: list[str] | None = None,
         interrupted_optuna_ids: list[str] | None = None,
+        refinement_counters: dict | None = None,
     ) -> None:
         """Save bot state for graceful shutdown / resume."""
         now = datetime.now(timezone.utc).isoformat()
@@ -716,6 +717,7 @@ class Storage:
             "last_completion_count": completion_count,
             "interrupted_refinement_ids": json.dumps(interrupted_refinement_ids or []),
             "interrupted_optuna_ids": json.dumps(interrupted_optuna_ids or []),
+            "config_snapshot": json.dumps(refinement_counters or {}),
             "stopped_at": now if status in ("stopped", "interrupted") else None,
             "started_at": now if status == "running" else None,
             "updated_at": now,

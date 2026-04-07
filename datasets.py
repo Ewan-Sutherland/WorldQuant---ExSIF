@@ -406,3 +406,29 @@ def print_dataset_summary():
         if fields:
             print(f"    e.g.: {', '.join(fields[:3])}")
     print(f"{'='*60}\n")
+
+
+# ── Family blocking based on available data ────────────────────────
+# Families that require specific data categories to function.
+# If the category is empty/missing, the family CANNOT produce valid expressions.
+
+FAMILY_REQUIRED_CATEGORIES = {
+    "model77_anomaly": ["model77"],
+    "model77_combo": ["model77"],
+    # Note: relationship uses rel_ret_* from supply_chain — available to all via team dataset
+    # Note: earnings_momentum uses snt1_d1_* — available on WQ platform even if not in team Excel
+}
+
+
+def get_blocked_families() -> set[str]:
+    """Return families that this bot cannot use due to missing data.
+    
+    A family is blocked if ALL its required data categories are empty.
+    """
+    names = get_all_field_names()
+    blocked = set()
+    for family, required_cats in FAMILY_REQUIRED_CATEGORIES.items():
+        has_any = any(len(names.get(cat, [])) > 0 for cat in required_cats)
+        if not has_any:
+            blocked.add(family)
+    return blocked

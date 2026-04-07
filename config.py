@@ -105,6 +105,18 @@ SOFT_PRUNE_REFINEMENT_PROBABILITY = 0.35
 # AUTO_SUBMIT=False → stages best variant in ready_alphas table for manual submission
 AUTO_SUBMIT = False
 
+# v7.0: Scheduled submission pipeline — runs at specific hours (UTC) per owner.
+# Each owner gets 2 windows per day, 12 hours apart, offset by 1 hour.
+# The pipeline re-checks all scores, groups by core signal, submits greedily.
+# Set your schedule here or let it auto-assign based on alphabetical order.
+SUBMIT_SCHEDULE = {
+    # "ewansutherland@icloud.com": [5, 17],   # 5am and 5pm UTC
+    # "gmpc201@exeter.ac.uk": [6, 18],         # 6am and 6pm UTC
+    # "tns203@exeter.ac.uk": [7, 19],           # 7am and 7pm UTC
+}
+# Minimum score change to auto-submit (avoids marginal alphas flipping negative)
+SUBMIT_MIN_SCORE = 3
+
 # v6.2: Number of Optuna settings variants to try per eligible alpha
 OPTIMIZE_VARIANTS = 5
 

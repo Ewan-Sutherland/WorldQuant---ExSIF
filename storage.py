@@ -968,7 +968,8 @@ class Storage:
     # ── v7.0: Bot state stubs (no-op for SQLite — team features need Supabase) ──
 
     def save_bot_state(self, status="stopped", completion_count=0,
-                       interrupted_refinement_ids=None, interrupted_optuna_ids=None):
+                       interrupted_refinement_ids=None, interrupted_optuna_ids=None,
+                       refinement_counters=None):
         pass  # SQLite doesn't support team features
 
     def get_bot_state(self):

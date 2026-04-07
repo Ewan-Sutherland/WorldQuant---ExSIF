@@ -133,14 +133,22 @@ def main() -> None:
     except Exception as e:
         print(f"[SHUTDOWN_WARN] Could not publish team stats: {e}")
 
-    # 4. Save bot state
+    # 4. Save bot state + refinement counters
     try:
+        refinement_counters = {
+            "refinement_attempts_by_base": getattr(bot, "refinement_attempts_by_base", {}),
+            "refinement_attempts_by_core": getattr(bot, "refinement_attempts_by_core", {}),
+            "core_signal_exhausted": getattr(bot, "core_signal_exhausted", {}),
+            "family_template_exhausted": getattr(bot, "family_template_exhausted", {}),
+        }
         storage.save_bot_state(
             status="interrupted" if (in_flight_runs or mid_refinement_ids) else "stopped",
             completion_count=getattr(bot, "total_completions", 0),
             interrupted_refinement_ids=mid_refinement_ids,
+            refinement_counters=refinement_counters,
         )
-        print(f"[SHUTDOWN] Bot state saved (completions={getattr(bot, 'total_completions', 0)})")
+        print(f"[SHUTDOWN] Bot state saved (completions={getattr(bot, 'total_completions', 0)}, "
+              f"refinement_counters={sum(len(v) for v in refinement_counters.values())} entries)")
     except Exception as e:
         print(f"[SHUTDOWN_WARN] Could not save bot state: {e}")
 
