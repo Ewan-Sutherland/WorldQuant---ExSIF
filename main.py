@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import signal
+import sys
 import time
 
 import config
@@ -28,21 +31,120 @@ def main() -> None:
         scheduler=scheduler,
     )
 
+    # ── Graceful shutdown handler ─────────────────────────────────
+    shutdown_requested = False
+
+    def handle_shutdown(signum, frame):
+        nonlocal shutdown_requested
+        if shutdown_requested:
+            print("\n[FORCE_STOP] Second signal — exiting immediately")
+            sys.exit(1)
+        shutdown_requested = True
+        sig_name = signal.Signals(signum).name if hasattr(signal, "Signals") else signum
+        print(f"\n[SHUTDOWN] {sig_name} received — finishing current tick, then saving state...")
+
+    signal.signal(signal.SIGINT, handle_shutdown)
+    signal.signal(signal.SIGTERM, handle_shutdown)
+
+    # ── Startup: recover and resume ───────────────────────────────
     bot.recover_running_from_storage()
     bot.mark_stale_runs_timed_out()
 
-    print("[START] Alpha bot is running")
+    # v7.0: Resume interrupted refinements from last shutdown
+    try:
+        bot_state = storage.get_bot_state()
+        if bot_state and bot_state.get("status") == "interrupted":
+            interrupted_refs = bot_state.get("interrupted_refinement_ids")
+            if interrupted_refs:
+                ids = json.loads(interrupted_refs) if isinstance(interrupted_refs, str) else (interrupted_refs or [])
+                for cid in ids:
+                    try:
+                        storage.un_consume_refinement(cid)
+                        print(f"[RESUME] Re-queued interrupted refinement: {cid[:20]}...")
+                    except Exception as e:
+                        print(f"[RESUME_WARN] Could not re-queue {cid[:20]}: {e}")
+                if ids:
+                    print(f"[RESUME] Re-queued {len(ids)} interrupted refinements")
+    except Exception as e:
+        print(f"[RESUME_WARN] Could not load bot state: {e}")
 
-    while True:
+    # Mark ourselves as running
+    try:
+        storage.save_bot_state(status="running", completion_count=0)
+    except Exception:
+        pass
+
+    # v7.0: Print dataset summary on startup
+    try:
+        from datasets import print_dataset_summary
+        print_dataset_summary()
+    except Exception as e:
+        print(f"[DATASETS_WARN] {e}")
+
+    print("[START] Alpha bot is running")
+    print(f"[START] Owner: {storage.owner}")
+    print(f"[START] Press Ctrl+C once for graceful shutdown, twice to force quit")
+
+    # ── Main loop ─────────────────────────────────────────────────
+    tick_count = 0
+
+    while not shutdown_requested:
         try:
             bot.tick()
+            tick_count += 1
+
+            # Periodic heartbeat
+            if tick_count % 10 == 0:
+                try:
+                    storage.heartbeat()
+                except Exception:
+                    pass
+
         except KeyboardInterrupt:
-            print("\n[STOP] Interrupted by user")
+            handle_shutdown(signal.SIGINT, None)
             break
         except Exception as exc:
             print(f"[MAIN_LOOP_ERROR] {exc}")
 
         time.sleep(config.POLL_INTERVAL_SECONDS)
+
+    # ── Graceful shutdown sequence ────────────────────────────────
+    print("[SHUTDOWN] Saving state...")
+
+    # 1. Collect in-flight run IDs
+    in_flight_runs = []
+    try:
+        running = storage.get_running_runs()
+        in_flight_runs = [r["run_id"] for r in running]
+        if in_flight_runs:
+            storage.mark_runs_interrupted(in_flight_runs)
+            print(f"[SHUTDOWN] Marked {len(in_flight_runs)} in-flight runs as interrupted")
+    except Exception as e:
+        print(f"[SHUTDOWN_WARN] Could not mark in-flight runs: {e}")
+
+    # 2. Collect mid-refinement candidate IDs
+    mid_refinement_ids = list(getattr(bot, "_active_refinement_ids", set()))
+
+    # 3. Publish final stats to team_stats table
+    try:
+        if hasattr(bot, "team_weights") and bot.team_weights:
+            bot.team_weights.publish_own_stats()
+            print("[SHUTDOWN] Published final team stats")
+    except Exception as e:
+        print(f"[SHUTDOWN_WARN] Could not publish team stats: {e}")
+
+    # 4. Save bot state
+    try:
+        storage.save_bot_state(
+            status="interrupted" if (in_flight_runs or mid_refinement_ids) else "stopped",
+            completion_count=getattr(bot, "total_completions", 0),
+            interrupted_refinement_ids=mid_refinement_ids,
+        )
+        print(f"[SHUTDOWN] Bot state saved (completions={getattr(bot, 'total_completions', 0)})")
+    except Exception as e:
+        print(f"[SHUTDOWN_WARN] Could not save bot state: {e}")
+
+    print("[STOP] Shutdown complete")
 
 
 if __name__ == "__main__":

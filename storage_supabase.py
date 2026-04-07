@@ -275,15 +275,26 @@ class Storage:
             "base_sharpe": base_sharpe,
             "base_fitness": base_fitness,
             "base_turnover": base_turnover,
+            "owner": self.owner,
         }, upsert=True)
 
     def get_next_refinement_candidate(self) -> Optional[dict]:
-        rows = self._get("refinement_queue", {
-            "consumed": "eq.false",
-            "select": "*",
-            "order": "priority.desc",
-            "limit": "1",
-        })
+        # Try owner-scoped first (v7.0), fall back to global (pre-migration)
+        try:
+            rows = self._get("refinement_queue", {
+                "consumed": "eq.false",
+                "owner": f"eq.{self.owner}",
+                "select": "*",
+                "order": "priority.desc",
+                "limit": "1",
+            })
+        except Exception:
+            rows = self._get("refinement_queue", {
+                "consumed": "eq.false",
+                "select": "*",
+                "order": "priority.desc",
+                "limit": "1",
+            })
         if not rows:
             return None
 
@@ -310,14 +321,24 @@ class Storage:
     # ── Complex Queries (via RPC) ─────────────────────────────────────
 
     def get_recent_family_stats(self, limit: int = 500) -> list[dict]:
-        return self._rpc("get_family_stats", {"run_limit": limit})
+        try:
+            return self._rpc("get_family_stats", {"run_limit": limit, "owner_filter": self.owner})
+        except Exception:
+            # Fallback for pre-migration Supabase (RPC doesn't accept owner_filter yet)
+            return self._rpc("get_family_stats", {"run_limit": limit})
 
     def get_recent_template_stats(self, limit: int = 180) -> list[dict]:
-        return self._rpc("get_template_stats", {"run_limit": limit})
+        try:
+            return self._rpc("get_template_stats", {"run_limit": limit, "owner_filter": self.owner})
+        except Exception:
+            return self._rpc("get_template_stats", {"run_limit": limit})
 
     def get_recent_settings_stats(self, limit: int = 500) -> dict[str, list[dict]]:
         """v5.5: Return performance stats grouped by each settings dimension."""
-        rows = self._rpc("get_settings_stats", {"run_limit": limit})
+        try:
+            rows = self._rpc("get_settings_stats", {"run_limit": limit, "owner_filter": self.owner})
+        except Exception:
+            rows = self._rpc("get_settings_stats", {"run_limit": limit})
         # RPC returns flat rows with 'dimension' column — group by dimension
         results: dict[str, list[dict]] = {
             "universe": [], "neutralization": [], "decay": [], "truncation": [],
@@ -329,10 +350,16 @@ class Storage:
         return results
 
     def get_submitted_candidate_rows(self, *, limit: int = 300) -> list[dict]:
-        return self._rpc("get_submitted_candidates", {"row_limit": limit})
+        try:
+            return self._rpc("get_submitted_candidates", {"row_limit": limit, "owner_filter": self.owner})
+        except Exception:
+            return self._rpc("get_submitted_candidates", {"row_limit": limit})
 
     def get_submission_eligible_candidates(self, *, limit: int = 50) -> list[dict]:
-        return self._rpc("get_eligible_candidates", {"row_limit": limit})
+        try:
+            return self._rpc("get_eligible_candidates", {"row_limit": limit, "owner_filter": self.owner})
+        except Exception:
+            return self._rpc("get_eligible_candidates", {"row_limit": limit})
 
     def get_similarity_reference_candidates(
         self, *, limit: int, min_sharpe: float, min_fitness: float,
@@ -659,6 +686,141 @@ class Storage:
             "status": "ready",
             "owner": self.owner,
         })
+
+
+    # ── Bot State (graceful shutdown / resume) ─────────────────────
+
+    def save_bot_state(
+        self,
+        status: str,
+        completion_count: int = 0,
+        interrupted_refinement_ids: list[str] | None = None,
+        interrupted_optuna_ids: list[str] | None = None,
+    ) -> None:
+        """Save bot state for graceful shutdown / resume."""
+        now = datetime.now(timezone.utc).isoformat()
+        self._post("bot_state", {
+            "owner": self.owner,
+            "status": status,
+            "last_heartbeat": now,
+            "last_completion_count": completion_count,
+            "interrupted_refinement_ids": json.dumps(interrupted_refinement_ids or []),
+            "interrupted_optuna_ids": json.dumps(interrupted_optuna_ids or []),
+            "stopped_at": now if status in ("stopped", "interrupted") else None,
+            "started_at": now if status == "running" else None,
+            "updated_at": now,
+        }, upsert=True)
+
+    def get_bot_state(self) -> Optional[dict]:
+        """Load this bot's last saved state."""
+        rows = self._get("bot_state", {
+            "owner": f"eq.{self.owner}",
+            "limit": "1",
+        })
+        return rows[0] if rows else None
+
+    def heartbeat(self) -> None:
+        """Update heartbeat timestamp — shows bot is alive."""
+        now = datetime.now(timezone.utc).isoformat()
+        self._patch("bot_state", {"owner": self.owner}, {
+            "last_heartbeat": now,
+            "status": "running",
+            "updated_at": now,
+        })
+
+    def get_own_unconsumed_refinement_count(self) -> int:
+        """How many refinement items are queued for this bot?"""
+        rows = self._get("refinement_queue", {
+            "consumed": "eq.false",
+            "owner": f"eq.{self.owner}",
+            "select": "candidate_id",
+        })
+        return len(rows)
+
+    def un_consume_refinement(self, candidate_id: str) -> None:
+        """Re-queue a refinement candidate that was interrupted mid-processing."""
+        self._patch("refinement_queue", {"candidate_id": candidate_id}, {
+            "consumed": False,
+        })
+
+    def mark_runs_interrupted(self, run_ids: list[str]) -> None:
+        """Mark in-flight runs as interrupted (resumable on next start)."""
+        for rid in run_ids:
+            try:
+                self._patch("runs", {"run_id": rid}, {
+                    "status": "interrupted",
+                    "error_message": "Bot shutdown — will resume on restart",
+                })
+            except Exception as e:
+                logger.warning(f"[SHUTDOWN] Failed to mark run {rid} interrupted: {e}")
+
+    # ── Activity Log (team monitoring) ────────────────────────────
+
+    def log_activity(
+        self,
+        family: str,
+        template_id: str,
+        expression_short: str,
+        sharpe: float | None = None,
+        fitness: float | None = None,
+        turnover: float | None = None,
+        eligible: bool = False,
+        fail_reason: str | None = None,
+        was_refinement: bool = False,
+        submitted: bool = False,
+        score_change: float | None = None,
+    ) -> None:
+        """Log a completed sim to the activity table for team monitoring."""
+        try:
+            self._post("bot_activity", {
+                "owner": self.owner,
+                "family": family,
+                "template_id": template_id,
+                "expression_short": expression_short[:80],
+                "sharpe": sharpe,
+                "fitness": fitness,
+                "turnover": turnover,
+                "eligible": eligible,
+                "fail_reason": fail_reason,
+                "was_refinement": was_refinement,
+                "submitted": submitted,
+                "score_change": score_change,
+            })
+        except Exception as e:
+            pass  # Never crash the bot over logging
+
+    def update_dashboard(
+        self,
+        total_sims: int = 0,
+        total_eligible: int = 0,
+        total_submitted: int = 0,
+        sims_since_eligible: int = 0,
+        stall_level: int = 0,
+        last_error: str | None = None,
+        last_report: str | None = None,
+    ) -> None:
+        """Update the bot_state dashboard fields."""
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            self._patch("bot_state", {"owner": self.owner}, {
+                "total_sims": total_sims,
+                "total_eligible": total_eligible,
+                "total_submitted": total_submitted,
+                "sims_since_eligible": sims_since_eligible,
+                "stall_level": stall_level,
+                "last_error": last_error,
+                "last_report": (last_report or "")[:4000],  # cap at 4KB
+                "updated_at": now,
+            })
+        except Exception as e:
+            pass  # Never crash over dashboard
+
+    def prune_activity_log(self, max_per_owner: int = 2000) -> None:
+        """Remove old activity rows to keep table small."""
+        try:
+            self._rpc("prune_bot_activity", {"max_per_owner": max_per_owner})
+        except Exception:
+            pass
 
 
 class _EmptyResult:

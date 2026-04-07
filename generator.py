@@ -12,7 +12,7 @@ from templates import (
     SENTIMENT_FIELDS, OPTIONS_WINDOWS, FSCORE_FIELDS,
     SAFE_PARAM_RANGES, TEMPLATE_LIBRARY,
     DERIVATIVE_FIELDS, PCR_WINDOWS,
-    MODEL77_ALL_FIELDS, MODEL77_TIER1_FIELDS, MODEL77_TIER2_FIELDS,
+    MODEL77_ALL_FIELDS, MODEL77_TIER1_FIELDS, MODEL77_TIER2_FIELDS, MODEL77_TIER3_FIELDS,
     MODEL77_NEGATIVE_DIRECTION, DATASET_NEUTRALIZATION,
 )
 import templates as templates_mod
@@ -717,10 +717,13 @@ class AlphaGenerator:
             p["pcr_window"] = self.rng.choice(PCR_WINDOWS)
         # v5.9: model77 field sampling with tier weighting
         if "{model77_field}" in template:
-            if self.rng.random() < 0.70:
+            _m77_roll = self.rng.random()
+            if _m77_roll < 0.70 and MODEL77_TIER1_FIELDS:
                 p["model77_field"] = self.rng.choice(MODEL77_TIER1_FIELDS)
+            elif _m77_roll < 0.95 or not MODEL77_TIER3_FIELDS:
+                p["model77_field"] = self.rng.choice(MODEL77_TIER2_FIELDS if MODEL77_TIER2_FIELDS else MODEL77_ALL_FIELDS)
             else:
-                p["model77_field"] = self.rng.choice(MODEL77_TIER2_FIELDS)
+                p["model77_field"] = self.rng.choice(MODEL77_TIER3_FIELDS)
         return p
 
     def _mutate_params_for_mode(self, params, template, mode: str, metrics_hint: dict[str, Any] | None = None):
@@ -803,16 +806,22 @@ class AlphaGenerator:
         # v5.9: model77 field mutation
         if "model77_field" in out and self.rng.random() < 0.20:
             # Mutate to a different model77 field (higher mutation rate — huge field space)
-            if self.rng.random() < 0.70:
+            _m77_roll = self.rng.random()
+            if _m77_roll < 0.70 and MODEL77_TIER1_FIELDS:
                 out["model77_field"] = self.rng.choice(MODEL77_TIER1_FIELDS)
+            elif _m77_roll < 0.95 or not MODEL77_TIER3_FIELDS:
+                out["model77_field"] = self.rng.choice(MODEL77_TIER2_FIELDS if MODEL77_TIER2_FIELDS else MODEL77_ALL_FIELDS)
             else:
-                out["model77_field"] = self.rng.choice(MODEL77_TIER2_FIELDS)
+                out["model77_field"] = self.rng.choice(MODEL77_TIER3_FIELDS)
 
         if "{model77_field}" in template and "model77_field" not in out:
-            if self.rng.random() < 0.70:
+            _m77_roll = self.rng.random()
+            if _m77_roll < 0.70 and MODEL77_TIER1_FIELDS:
                 out["model77_field"] = self.rng.choice(MODEL77_TIER1_FIELDS)
+            elif _m77_roll < 0.95 or not MODEL77_TIER3_FIELDS:
+                out["model77_field"] = self.rng.choice(MODEL77_TIER2_FIELDS if MODEL77_TIER2_FIELDS else MODEL77_ALL_FIELDS)
             else:
-                out["model77_field"] = self.rng.choice(MODEL77_TIER2_FIELDS)
+                out["model77_field"] = self.rng.choice(MODEL77_TIER3_FIELDS)
 
         return out
 

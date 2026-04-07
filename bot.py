@@ -98,6 +98,21 @@ class AlphaBot:
             self.signal_combiner = None
             print(f"[COMBINER] Not available: {exc}")
 
+        # v7.0: Team shared weights — blends own learning with teammates' data
+        try:
+            from team_weights import TeamWeights
+            self.team_weights = TeamWeights(storage, owner=storage.owner)
+            print(f"[TEAM] Team weights enabled for {storage.owner}")
+        except Exception as exc:
+            self.team_weights = None
+            print(f"[TEAM] Not available: {exc}")
+
+        # v7.0: Track active refinement IDs for graceful shutdown resume
+        self._active_refinement_ids: set[str] = set()
+        self.total_completions = 0
+        self._total_eligible = 0
+        self._total_submitted = 0
+
         # v6.1: Evolutionary LLM mutation — evolves top performers
         try:
             from alpha_evolver import AlphaEvolver
@@ -303,8 +318,9 @@ class AlphaBot:
             status = result.get("status", "running")
 
             if status in {"submitted", "running"}:
-                if status == "running":
-                    self.storage.update_run(run_id, status="running")
+                # v7.0: Removed update_run(status="running") here — was writing to
+                # Supabase every tick for every active sim just to confirm "still running".
+                # Status is already "running" from when the sim was submitted.
                 continue
 
             self.scheduler.remove(sim_id)
@@ -427,9 +443,11 @@ class AlphaBot:
             print(f"[REFINEMENT_QUEUE_ERROR] {exc}")
 
         self.completed_runs += 1
+        self.total_completions += 1
         # v6.2.1: Stall detection tracking
         self._sims_since_last_eligible += 1
         if decision.should_submit:
+            self._total_eligible += 1
             self._last_eligible_time = utc_now()
             self._sims_since_last_eligible = 0
             if self._stall_level > 0:
@@ -446,6 +464,23 @@ class AlphaBot:
             f"eligible={decision.should_submit} reason={decision.reason}"
         )
 
+        # v7.0: Log to bot_activity for team monitoring
+        try:
+            cand_row = self.storage.get_candidate_by_id(candidate_id)
+            if cand_row:
+                self.storage.log_activity(
+                    family=cand_row.get("family", ""),
+                    template_id=cand_row.get("template_id", ""),
+                    expression_short=cand_row.get("canonical_expression", "")[:80],
+                    sharpe=metrics.sharpe,
+                    fitness=metrics.fitness,
+                    turnover=metrics.turnover,
+                    eligible=decision.should_submit,
+                    fail_reason=decision.reason if not decision.should_submit else None,
+                )
+        except Exception:
+            pass  # Never crash over logging
+
         # When eligible, submit immediately — let WQ's server-side self-correlation
         # check be the judge. v5.4 blocked 6 eligible alphas that may have passed.
         # The data-category proxy was wrong — cost us real submissions.
@@ -459,6 +494,30 @@ class AlphaBot:
 
         if self.completed_runs % config.REPORT_EVERY_N_COMPLETIONS == 0:
             self._print_progress_report()
+            # v7.0: Publish own stats to team_stats table for teammate learning
+            if self.team_weights:
+                try:
+                    self.team_weights.publish_own_stats()
+                    self.team_weights.invalidate_cache()
+                except Exception as exc:
+                    print(f"[TEAM_PUBLISH_ERROR] {exc}")
+            # v7.0: Update dashboard + prune old activity rows
+            try:
+                self.storage.update_dashboard(
+                    total_sims=self.total_completions,
+                    total_eligible=getattr(self, '_total_eligible', 0),
+                    total_submitted=getattr(self, '_total_submitted', 0),
+                    sims_since_eligible=self._sims_since_last_eligible,
+                    stall_level=self._stall_level,
+                )
+            except Exception:
+                pass
+            # Prune activity log every 10 report cycles (~500 completions)
+            if self.completed_runs % (config.REPORT_EVERY_N_COMPLETIONS * 10) == 0:
+                try:
+                    self.storage.prune_activity_log()
+                except Exception:
+                    pass
 
     def _maybe_queue_refinement(self, candidate_id: str, run_id: str, metrics) -> None:
         sharpe = metrics.sharpe
@@ -1345,6 +1404,11 @@ class AlphaBot:
     # =========================================================
 
     def _template_stats_map(self) -> dict[str, dict]:
+        # v7.0: Cache stats for 3 minutes to reduce Supabase egress
+        import time
+        now = time.time()
+        if hasattr(self, '_template_stats_cache_time') and (now - self._template_stats_cache_time) < 180:
+            return self._template_stats_cache
         rows = self.storage.get_recent_template_stats(limit=config.TEMPLATE_SCORE_LOOKBACK_RUNS)
         out: dict[str, dict] = {}
         for row in rows:
@@ -1355,9 +1419,15 @@ class AlphaBot:
                 "avg_fitness": row["avg_fitness"],
                 "avg_turnover": row["avg_turnover"],
             }
+        self._template_stats_cache = out
+        self._template_stats_cache_time = now
         return out
 
     def _family_stats_map(self) -> dict[str, dict]:
+        import time
+        now = time.time()
+        if hasattr(self, '_family_stats_cache_time') and (now - self._family_stats_cache_time) < 180:
+            return self._family_stats_cache
         rows = self.storage.get_recent_family_stats(limit=config.TEMPLATE_SCORE_LOOKBACK_RUNS)
         out: dict[str, dict] = {}
         for row in rows:
@@ -1368,6 +1438,8 @@ class AlphaBot:
                 "avg_turnover": row["avg_turnover"],
                 "submit_rate": row["submit_rate"] if "submit_rate" in row.keys() else None,
             }
+        self._family_stats_cache = out
+        self._family_stats_cache_time = now
         return out
 
     def _score_from_stats(
@@ -1460,6 +1532,18 @@ class AlphaBot:
 
             bias[family] = weight
 
+        # v7.0: Blend with team weights (teammates' learned data)
+        if self.team_weights:
+            try:
+                team_bias = self.team_weights.get_blended_family_weights()
+                for family, team_w in team_bias.items():
+                    if family in bias:
+                        bias[family] *= team_w
+                    else:
+                        bias[family] = team_w
+            except Exception as exc:
+                print(f"[TEAM_BIAS_WARN] {exc}")
+
         return bias
 
     def _template_bias_map(self) -> dict[str, float]:
@@ -1473,6 +1557,18 @@ class AlphaBot:
                 avg_turnover=row["avg_turnover"],
                 n_runs=row["n_runs"],
             )
+
+        # v7.0: Blend with team template weights
+        if self.team_weights:
+            try:
+                team_bias = self.team_weights.get_blended_template_weights()
+                for tid, team_w in team_bias.items():
+                    if tid in bias:
+                        bias[tid] *= team_w
+                    else:
+                        bias[tid] = team_w
+            except Exception as exc:
+                print(f"[TEAM_TEMPLATE_BIAS_WARN] {exc}")
 
         return bias
 
@@ -1956,6 +2052,9 @@ class AlphaBot:
             if refinement_row is not None:
                 base_candidate_id = refinement_row["candidate_id"]
 
+                # v7.0: Track for graceful shutdown resume
+                self._active_refinement_ids.add(base_candidate_id)
+
                 # Avoid hammering the same base in a single tick
                 if base_candidate_id == last_base_tried:
                     fresh = self._fresh_candidate()
@@ -1970,6 +2069,7 @@ class AlphaBot:
                 core = self._extract_core_signal(refinement_row.get("canonical_expression", ""))
                 if core and self.refinement_attempts_by_core.get(core, 0) >= max_core_refine:
                     self.storage.mark_refinement_consumed(base_candidate_id)
+                    self._active_refinement_ids.discard(base_candidate_id)
                     print(f"[CORE_REFINE_CAP] core='{core[:60]}' attempts={self.refinement_attempts_by_core[core]} — skipping")
                     continue
 
@@ -1978,6 +2078,7 @@ class AlphaBot:
                 is_sweep_refine = str(refinement_row.get("template_id", "")).startswith("sweep_")
                 if core and core in self.rejected_cores and not is_sweep_refine:
                     self.storage.mark_refinement_consumed(base_candidate_id)
+                    self._active_refinement_ids.discard(base_candidate_id)
                     print(f"[REFINE_SKIP_CORR] core='{core[:60]}' — already rejected by WQ, skipping refinement")
                     continue
 
@@ -1985,11 +2086,13 @@ class AlphaBot:
                 # v6.2.1: EXCEPT sweep candidates — different universes may have positive score change
                 if core and core in self._score_negative_cores and not is_sweep_refine:
                     self.storage.mark_refinement_consumed(base_candidate_id)
+                    self._active_refinement_ids.discard(base_candidate_id)
                     print(f"[REFINE_SKIP_SCORE] core='{core[:60]}' — negative score change, skipping refinement")
                     continue
 
                 if self._should_abandon_refinement_base(base_candidate_id):
                     self.storage.mark_refinement_consumed(base_candidate_id)
+                    self._active_refinement_ids.discard(base_candidate_id)
                     self.refinement_attempts_by_base.pop(base_candidate_id, None)
 
                     # Track core signal exhaustion to prevent infinite re-queuing
@@ -2091,6 +2194,7 @@ class AlphaBot:
                     )
                     if self._diversity_skip_count[base_candidate_id] >= 2:
                         self.storage.mark_refinement_consumed(base_candidate_id)
+                        self._active_refinement_ids.discard(base_candidate_id)
                         self.refinement_attempts_by_base.pop(base_candidate_id, None)
                         self._diversity_skip_count.pop(base_candidate_id, None)
                         print(

@@ -25,7 +25,10 @@ BRAIN_PASSWORD = os.getenv("BRAIN_PASSWORD", "")
 
 # Scheduler / runtime
 MAX_CONCURRENT_SIMS = 3
-POLL_INTERVAL_SECONDS = 20
+# v7.0: Increased from 20s → 40s to reduce Supabase egress.
+# WQ sims take 2-5 minutes — polling every 20s wastes bandwidth.
+# 40s still catches completions within one extra poll cycle.
+POLL_INTERVAL_SECONDS = 40
 SESSION_REFRESH_MINUTES = 150
 SIM_TIMEOUT_MINUTES = 45
 
@@ -77,7 +80,7 @@ DIVERSITY_EXPLORATION_PROBABILITY = 0.12
 MAX_REFINEMENT_ATTEMPTS_PER_BASE = 5   # v6.0: was 10 — logs show 10+ attempts never crack fitness
 MAX_CORE_SIGNAL_EXHAUSTIONS = 2  # v6.0: was 3 — same core through different candidates wastes sims
 MAX_FAMILY_TEMPLATE_EXHAUSTIONS = 2  # v6.0: was 3 — m7c_03 exhausted 12 times in overnight run
-MAX_REFINEMENT_PER_CORE = 5  # v6.2.1: was 5 — faster exhaustion, queue was growing unbounded
+MAX_REFINEMENT_PER_CORE = 3  # v6.2.1: was 5 — faster exhaustion, queue was growing unbounded
 MAX_SUBMISSIONS_PER_CORE = 3  # v6.0.1: allow up to 3 variants of same core before blocking (WQ accepts different post-processing)
 LOCAL_REFINEMENT_HISTORY = 10
 LOCAL_REFINEMENT_MAX_SIMILARITY = 0.90
@@ -116,11 +119,13 @@ SUBMISSION_MAX_SIMILARITY = 0.45
 UNSUBMITTED_FAMILY_BOOST = 1.60
 
 # Logging / reporting
-REPORT_EVERY_N_COMPLETIONS = 25
+# v7.0: Increased from 25 → 50 to reduce Supabase egress (halves stats refresh frequency)
+REPORT_EVERY_N_COMPLETIONS = 50
 
 # Family/template weighting
 DEFAULT_FAMILY_ORDER = [
-    # v5.9: NEW — pre-computed academic anomalies (HIGHEST PRIORITY — 168 untapped fields)
+    # v7.0: All families with templates, ordered by data diversity
+    # Novel data categories first (highest exploration value)
     "model77_anomaly",
     "model77_combo",
     "expanded_fundamental",
@@ -128,9 +133,8 @@ DEFAULT_FAMILY_ORDER = [
     "risk_beta",
     "analyst_estimates",
     "wq_proven",
-    # v5.8: Multi-factor combinations
     "combo_factor",
-    # v5.7: Signal classes
+    # Signal classes
     "fundamental_value",
     "quality_trend",
     "fundamental_scores",
@@ -139,7 +143,7 @@ DEFAULT_FAMILY_ORDER = [
     "news_sentiment",
     "vol_regime",
     "size_value",
-    # Existing — medium priority
+    # Core families
     "cross_sectional",
     "liquidity_scaled",
     "conditional",
@@ -154,75 +158,84 @@ DEFAULT_FAMILY_ORDER = [
     "momentum",
     # v6.2.1: Untapped data categories
     "vector_data",
-    "model_data",
-    "event_driven",
+    # v7.0: Previously missing from ordering
+    "supply_chain",
+    "ravenpack_cat",
+    "options_analytics",
+    "hist_vol",
+    "fscore",
+    "risk_metrics",
+    "intraday_pattern",
+    "analyst_deep",
+    "social_scalar",
+    "wild_combos",
+    "tutorial_proven",
+    "high_sharpe",
+    "fn_financial",
+    "simple_ratio",
+    "fundamental_vol",
 ]
 
 FAMILY_BASE_WEIGHTS = {
-    # v6.2.1: Weights based on PORTFOLIO-ADDITIVE potential, not individual Sharpe.
-    # The portfolio is saturated with price_returns and model77 — every new alpha in those
-    # categories hurts score even if it passes individual checks. Options vol is the proven
-    # portfolio-additive signal (all 4 overnight winners used IV/parkinson ratio).
+    # v7.0+v6.2.1 MERGE: Curated weights from 600+ sims on Ewan's account.
+    # Dead families suppressed, portfolio-diverse families boosted.
     "model77_anomaly": 0.10,    # DEAD — standalone fields don't work
-    "model77_combo": 0.80,      # v6.2.1: was 4.00 — 82 sims, 0% submit, hurts portfolio score
-    "expanded_fundamental": 0.40,  # v6.2.1: was 0.80 — saturated data category
-    "relationship": 0.10,       # v6.2.1: 60 sims, S=0.10, 0% submit — DEAD, wasting sims
-    "risk_beta": 0.10,          # v6.2.1: 12 sims, S=-0.05, 0% submit — DEAD
-    "analyst_estimates": 1.50,  # ae_01 works but saturating
-    "wq_proven": 1.50,          # wp_05 works (23 eligible), wp_02 works (4 eligible)
-    # v5.8: Multi-factor combinations
-    "combo_factor": 1.50,       # v6.2.1: was 2.00 — many are model77 variants underneath
+    "model77_combo": 0.80,      # 82 sims, 0% submit, hurts portfolio score
+    "expanded_fundamental": 0.40,
+    "relationship": 0.10,       # 60 sims, S=0.10, 0% submit — DEAD
+    "risk_beta": 0.10,          # 12 sims, S=-0.05, 0% submit — DEAD
+    "analyst_estimates": 1.50,
+    "wq_proven": 1.50,
+    "combo_factor": 1.50,
     # SATURATED — 9+ submissions are returns mean reversion variants
     "mean_reversion": 0.05,
     "cross_sectional": 0.05,
     "liquidity_scaled": 0.08,
     "conditional": 0.10,
     "vol_adjusted": 0.08,
-    # v6.2.1: PORTFOLIO-ADDITIVE — boost genuinely different data categories
-    "fundamental_value": 3.00,  # v6.2.1: operating_income/parkinson_vol showed +152 score change — BOOST
+    # PORTFOLIO-ADDITIVE — boost genuinely different data categories
+    "fundamental_value": 3.00,  # operating_income/parkinson_vol showed +152 score change
     "quality_trend": 0.60,
-    "fundamental_scores": 0.10, # v6.2.1: 11 sims, S=-0.07 — DEAD
-    "earnings_momentum": 1.80,  # v6.2.1: was 1.20 — some signal, underexplored standalone
-    "options_vol": 3.50,        # v6.2.1: was 1.00 — PROVEN portfolio-additive (all 4 winners)
-    "news_sentiment": 0.50,     # v6.2.1: 8 sims, S=-0.01 — weak, reduce exploration
+    "fundamental_scores": 0.10, # 11 sims, S=-0.07 — DEAD
+    "earnings_momentum": 1.80,
+    "options_vol": 3.50,        # PROVEN portfolio-additive (all 4 winners)
+    "news_sentiment": 0.50,
     "vol_regime": 0.60,
     "size_value": 0.40,
-    # MEDIUM — legacy
     "volume_flow": 0.20,
     "price_vol_corr": 0.20,
-    "analyst_sentiment": 2.00,  # v6.2.1: was 0.30 — works in combos (snt1_d1 signals)
+    "analyst_sentiment": 2.00,  # works in combos (snt1_d1 signals)
     "volatility": 0.15,
-    "intraday": 0.05,           # v6.2.1: 14 sims, S=-0.66 — DEAD
+    "intraday": 0.05,           # 14 sims, S=-0.66 — DEAD
     "fundamental": 0.10,
     "momentum": 0.05,
-    # v6.2.1: UNTAPPED DATA — virtually zero correlation with existing portfolio
-    "vector_data": 3.00,    # vec_* operators on social/news vectors — proven S=1.94
-    "model_data": 0.01,     # v6.2.1: ALL mdf_*, mdl175_* fields DEAD on this account
-    "event_driven": 0.01,   # v6.2.1: ALL fnd6_*, fam_* fields DEAD on this account
-    # v6.2.1: NEW FAMILIES — 10 completely untapped data categories
-    "supply_chain": 4.00,       # pv13_* — 14 sims S=0.34, still exploring, academic backing
-    "ravenpack_cat": 3.50,      # rp_ess_* — 14 sims, rp_04 averaging S=1.07, PROMISING
-    "options_analytics": 0.10,  # v6.2.1: 8 sims, S=-0.15 — DEAD
-    "hist_vol": 3.00,           # v6.2.1: 14 sims, S=0.62, F=0.75 — WORKING, boost
-    "fscore": 0.10,             # v6.2.1: 10 sims, S=-0.28 — DEAD
-    "risk_metrics": 0.10,       # v6.2.1: 15 sims, S=0.13 — barely alive, suppress
-    "intraday_pattern": 0.50,   # v6.2.1: 8 sims, S=0.17 — weak but not dead
-    "analyst_deep": 0.10,       # v6.2.1: 6 sims, S=-0.22 — DEAD
-    "social_scalar": 0.10,      # v6.2.1: 1 sim, S=-0.55 — looks dead
-    "wild_combos": 0.10,        # v6.2.1: 7 sims, S=-0.23 — DEAD
-    "tutorial_proven": 3.00,    # v6.2.1: expressions from WQ official tutorial
-    "high_sharpe": 5.00,        # v6.2.1: research-proven S>2.0 patterns — HIGHEST PRIORITY
-    # v6.2.1: fn_ financial statement fields — MASSIVE portfolio diversity (+175, +198 score change)
-    "fn_financial": 5.00,       # fn_liab_fair_val, fn_oth_income — totally uncorrelated with portfolio
-    "simple_ratio": 5.00,       # liabilities/assets gave +175! Dead-simple ratios = max diversity
+    # UNTAPPED DATA — virtually zero correlation with existing portfolio
+    "vector_data": 3.00,
+    "model_data": 0.01,         # ALL mdf_*, mdl175_* fields DEAD on this account
+    "event_driven": 0.01,       # ALL fnd6_*, fam_* fields DEAD on this account
+    "supply_chain": 4.00,
+    "ravenpack_cat": 3.50,
+    "options_analytics": 0.10,  # 8 sims, S=-0.15 — DEAD
+    "hist_vol": 3.00,
+    "fscore": 0.10,             # 10 sims, S=-0.28 — DEAD
+    "risk_metrics": 0.10,
+    "intraday_pattern": 0.50,
+    "analyst_deep": 0.10,       # 6 sims, S=-0.22 — DEAD
+    "social_scalar": 0.10,
+    "wild_combos": 0.10,        # 7 sims, S=-0.23 — DEAD
+    "tutorial_proven": 3.00,
+    "high_sharpe": 5.00,        # research-proven S>2.0 patterns — HIGHEST PRIORITY
+    # fn_ financial statement fields — MASSIVE portfolio diversity (+175, +198 score change)
+    "fn_financial": 5.00,
+    "simple_ratio": 5.00,       # liabilities/assets gave +175!
     "fundamental_vol": 3.00,    # operating_income/parkinson_vol showed +152 score change
 }
 
 TEMPLATE_BASE_WEIGHTS = {
-    # v5.8: Multi-factor combination templates — HIGHEST PRIORITY
+    # v7.0+v6.2.1 MERGE: Curated per-template weights from 600+ sims
     "cf_01": 1.90,      # -rank(close/field) + -rank(returns) — direct Griff pattern
-    "cf_02": 1.90,      # -rank(ts_zscore(field)) + -rank(vwap rev) — direct Griff pattern
-    "cf_03": 1.80,      # rank(field/assets) + -rank(vwap rev) — Griff sales/assets pattern
+    "cf_02": 1.90,      # -rank(ts_zscore(field)) + -rank(vwap rev)
+    "cf_03": 1.80,      # rank(field/assets) + -rank(vwap rev)
     "cf_04": 1.70,      # rank(field/cap) + -rank(returns)
     "cf_05": 1.50,      # fundamental + vol_regime
     "cf_06": 1.70,      # earnings momentum + reversion
@@ -230,35 +243,33 @@ TEMPLATE_BASE_WEIGHTS = {
     "cf_08": 1.60,      # options IV ratio + reversion
     "cf_09": 1.55,      # fscore + reversion
     "cf_10": 1.40,      # sentiment + fundamental
-    # v5.7: New signal class templates
-    "fv_05": 1.40,      # ts_rank fundamental ratio, 252 days — from WQ seminar
-    "fv_06": 1.35,      # group_rank ts_rank — WQ seminar variant
+    "fv_05": 1.40,
+    "fv_06": 1.35,
     "qt_04": 1.30,
     "qt_06": 1.25,
-    "em_01": 1.40,      # net earnings revision — direct analyst signal
+    "em_01": 1.40,
     "em_07": 1.35,
-    "opt_05": 1.40,     # PCR timing — directly from WQ researcher
-    "opt_06": 1.35,     # IV momentum
+    "opt_05": 1.40,
+    "opt_06": 1.35,
     "opt_07": 1.30,
     "ns_01": 1.20,
     "ns_03": 1.20,
-    "vr_01": 1.30,      # WQ researcher said "works really well!"
+    "vr_01": 1.30,
     "vr_03": 1.20,
-    "fs_07": 1.30,      # derivative fields × adv20
+    "fs_07": 1.30,
     "fs_08": 1.25,
-    # Existing
     "fs_04": 1.40,
     "fs_05": 1.30,
     "fs_06": 1.25,
     "opt_03": 1.20,
     "opt_04": 1.15,
     # Legacy — heavily reduced (saturated signal classes)
-    "cs_02": 0.30,      # Was 0.80 — 3 submissions from this template
+    "cs_02": 0.30,
     "pvc_04": 0.60,
     "vol_03": 0.40,
     "mr_02": 0.20,
-    "cond_01": 0.20,    # Already submitted
-    "mr_04": 0.15,      # 2 submissions already
+    "cond_01": 0.20,
+    "mr_04": 0.15,
     "pvc_03": 0.40,
     "mr_01": 0.20,
 }
@@ -269,44 +280,10 @@ PREFERRED_TEMPLATE_BOOSTS = {
     "va_02": 1.20,
     "mr_01": 1.15,
     "cond_01": 1.10,
-    "fs_04": 1.50,      # v5.5: liquidity-weighted fscore — unlocks highest fitness signal
-    "fs_05": 1.45,      # v5.5: adv20-weighted fscore
-    "opt_03": 1.30,     # v5.5: under-tested, different data category
-    "opt_04": 1.25,     # v5.5: under-tested, different data category
-}
-
-TEMPLATE_WEIGHT_PENALTIES = {
-    "va_01": 0.35,
-    "vol_02": 0.30,
-    "cond_03": 0.40,
-    # v5.5: penalize original fscore templates — consistently fail CONCENTRATED_WEIGHT
-    "fs_01": 0.40,      # Unweighted fscore delta — concentrates weight
-    "fs_02": 0.30,      # Unweighted fscore zscore — 34x identical failures in v5.4
-    "fs_03": 0.40,      # Unweighted group_rank fscore — same issue
-    # v5.9.1: HARD PRUNE — templates proven dead from 1240-sim analysis
-    "ae_03": 0.01,       # 96 sims, 0 eligible — -ts_corr(est_ptp, est_fcf) doesn't work
-    "wp_06": 0.01,       # 18 sims, 0 eligible — -ts_rank(fn_liab_fair_val_l1_a) doesn't work
-    "wp_03": 0.05,       # 18 sims, 0 eligible — ts_regression complex expression
-    # v5.9.1: Standalone model77 templates — all dead (135 sims, best S=1.05)
-    "m77_01": 0.05,
-    "m77_02": 0.05,
-    "m77_03": 0.05,
-    "m77_04": 0.05,
-    "m77_05": 0.05,
-    "m77_06": 0.05,
-    "m77_07": 0.05,
-    "m77_08": 0.05,
-    "m77_09": 0.05,
-    # v6.2.1: wp_05 core (operating_income/cap) has 3+ submissions — always blocked by CORE_OVERLAP
-    "wp_05": 0.01,
-    # v6.2.1: HARD PRUNE from 600+ sim analysis
-    "llm_rela": 0.01,    # 23 sims, S=-0.05, hard_prune — relationship family LLM waste
-    "llm_cros": 0.01,    # 8 sims, S=-0.31, hard_prune — cross-sectional LLM waste
-    "llm_llm_": 0.05,    # 11 sims, S=0.06, hard_prune — generic LLM waste
-    "rel_01": 0.01,       # rank(rel_ret_cust) — S=-0.64
-    "rel_02": 0.01,       # -rank(rel_ret_comp) — S=-0.20
-    "fs_06": 0.01,        # composite_factor_score_derivative — S=-0.08
-    "fs_08": 0.01,        # analyst_revision * cap — S=-0.33
+    "fs_04": 1.50,
+    "fs_05": 1.45,
+    "opt_03": 1.30,
+    "opt_04": 1.25,
 }
 
 # v5.9.1: Boost model77_combo templates (near-passers at S=1.47)
@@ -328,18 +305,15 @@ PREFERRED_TEMPLATE_BOOSTS.update({
     "m7c_06": 3.00,      # BEST NEW: avg S=0.81, best F=1.39 — multiplicative × vol_regime
     "m7c_07": 0.01,      # DEAD: avg S=-0.01 in 7 sims
     "m7c_08": 0.01,      # DEAD: avg S=-0.17 in 2 sims
-    # v6.0: Q-theory — didn't work standalone, keep triple combo alive
     "m7c_09": 0.01,      # DEAD: avg S=0.14 standalone q-theory
     "m7c_10": 1.20,      # ALIVE: avg S=0.59, best S=1.01 — q-theory + price reversion
     "m7c_11": 0.01,      # DEAD: avg S=0.09 group_rank q-theory
-    # v6.0: Quality × value — low sharpe but interesting fitness profile
     "m7c_12": 0.80,      # KEEP LOW: avg S=0.20 but best F=1.21 — unusual
     "m7c_13": 1.00,      # KEEP: only 2 sims, avg S=0.56
-    # v6.0: 3-signal composites
     "m7c_14": 1.20,      # KEEP: avg S=0.42, best F=0.84
     "m7c_15": 0.60,      # SOFT PRUNE: avg S=0.43, 12 sims, never close
-    # v6.1: RAW MULTIPLICATIVE rank(A * B) — research says this form outperforms
-    "m7c_16": 2.50,      # model77 × price reversion — highest priority new form
+    # v6.1: RAW MULTIPLICATIVE rank(A * B)
+    "m7c_16": 2.50,      # model77 × price reversion
     "m7c_17": 2.50,      # model77 × vwap intraday
     "m7c_18": 2.50,      # model77 × vwap reversion smoothed
     "m7c_19": 2.00,      # model77 × IV skew — cross-dataset interaction
@@ -355,43 +329,35 @@ PREFERRED_TEMPLATE_BOOSTS.update({
     "cf_13": 2.50,       # fundamental/cap × vwap reversion raw mult
     "cf_14": 2.50,       # group_rank fundamental × reversion — industry
     "cf_15": 2.50,       # group_rank fundamental × reversion — subindustry
-    # v6.0: Relationship — decayed customer momentum underwhelming
-    "rel_09": 0.80,      # KEEP LOW: avg S=0.60 in 2 sims — needs more data
-    "rel_10": 0.01,      # DEAD: avg S=-1.09 — wrong sign!
+    "rel_09": 0.80,      # KEEP LOW: avg S=0.60 in 2 sims
+    "rel_10": 0.01,      # DEAD: avg S=-1.09
     "rel_11": 0.40,      # WEAK: avg S=0.08
-    # v6.0: Expanded fundamental research templates — all failed
     "ef_15": 0.01,       # DEAD: S=-0.56
     "ef_16": 0.01,       # DEAD: avg S=-0.55
     "ef_17": 0.01,       # DEAD: avg S=-0.17
     "ef_18": 0.01,       # DEAD: avg S=0.03
-    # v6.2.1: PORTFOLIO-ADDITIVE templates — highest priority new templates
-    # Options vol (the proven winner — all 4 overnight +score alphas used IV/parkinson)
-    "opt_10": 3.00,      # IV/parkinson standalone — the core winning signal
+    # v6.2.1: PORTFOLIO-ADDITIVE templates
+    "opt_10": 3.00,      # IV/parkinson standalone
     "opt_11": 3.00,      # IV/parkinson group_rank
     "opt_12": 3.50,      # IV/parkinson × sentiment — the +48 pattern
     "opt_13": 3.50,      # IV/parkinson × fundamentals cross-category
-    "opt_14": 2.50,      # Options term structure (long-short IV spread)
+    "opt_14": 2.50,      # Options term structure
     "opt_15": 2.50,      # Options term structure × liquidity
     "opt_16": 2.00,      # PCR mean reversion
-    # News sentiment (untapped, likely uncorrelated)
     "ns_09": 2.50,       # News × reversion
     "ns_10": 2.50,       # RavenPack earnings × reversion
     "ns_11": 2.50,       # Sentiment × liquidity × reversion
     "ns_12": 2.00,       # Buzz acceleration × sentiment
-    # Risk beta cross-category
     "rb_08": 2.00,       # Beta × fundamentals
     "rb_09": 2.00,       # Beta + analyst estimates
     "rb_10": 1.80,       # Unsystematic risk × profitability
     "rb_11": 2.20,       # Beta × options vol (two additive categories!)
-    # Intraday cross-category
     "iday_06": 2.00,     # Candle body × sentiment
     "iday_07": 1.80,     # Range zscore × liquidity
     "iday_08": 1.80,     # Industry-relative close position
-    # Analyst sentiment cross-category
-    "ans_04": 2.50,      # Sentiment × reversion (proven in +46 resim)
+    "ans_04": 2.50,      # Sentiment × reversion
     "ans_05": 2.50,      # Earnings surprise × value
     "ans_06": 2.50,      # Analyst rating × vwap reversion
-    # v6.2.1: UNTAPPED DATA templates — highest priority exploration
     "vec_01": 3.50,      # Proven buzz pattern (S=1.94)
     "vec_02": 3.00,      # Sentiment vector
     "vec_03": 3.00,      # Buzz count × reversion
@@ -415,19 +381,38 @@ PREFERRED_TEMPLATE_BOOSTS.update({
     "evt_05": 3.00,      # Surprise × reversion
     "evt_06": 2.50,      # ROE rank × reversion
     "evt_07": 3.00,      # Event timing × fundamental
-    # Multi-period (structurally different — short+long agreement)
     "fv_08": 2.00,       # Multi-period fundamental 22×252
     "fv_09": 2.00,       # Multi-period fundamental 60×252
-    # Academic anomalies (proven in research)
     "ef_19": 2.50,       # Accrual anomaly — Sloan 1996
     "ef_20": 2.50,       # Balance sheet accrual
     "ef_21": 2.50,       # Retained earnings reversion — proven S=1.55
     "ef_22": 2.50,       # Investment anomaly — Titman et al
-    # Pasteurize-wrapped + news conditional
     "vec_09": 2.50,      # Pasteurize buzz
     "vec_10": 2.50,      # Pasteurize news × reversion
     "vec_11": 3.50,      # News-conditional regime — proven S=1.84
 })
+
+TEMPLATE_WEIGHT_PENALTIES = {
+    "va_01": 0.35,
+    "vol_02": 0.30,
+    "cond_03": 0.40,
+    "fs_01": 0.40,
+    "fs_02": 0.30,
+    "fs_03": 0.40,
+    "ae_03": 0.01,
+    "wp_06": 0.01,
+    "wp_03": 0.05,
+    "m77_01": 0.05, "m77_02": 0.05, "m77_03": 0.05, "m77_04": 0.05,
+    "m77_05": 0.05, "m77_06": 0.05, "m77_07": 0.05, "m77_08": 0.05, "m77_09": 0.05,
+    "wp_05": 0.01,
+    "llm_rela": 0.01,
+    "llm_cros": 0.01,
+    "llm_llm_": 0.05,
+    "rel_01": 0.01,
+    "rel_02": 0.01,
+    "fs_06": 0.01,
+    "fs_08": 0.01,
+}
 
 DISABLED_REFINEMENT_TEMPLATES = {"vol_02", "ae_03", "wp_06"}
 SOFT_BLOCK_REFINEMENT_TEMPLATES = {"cond_03", "va_01"}

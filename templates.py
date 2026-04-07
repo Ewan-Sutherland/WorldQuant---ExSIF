@@ -565,40 +565,30 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
 
 # ── Field lists ───────────────────────────────────────────────────────
 
-FUNDAMENTAL_FIELDS = ["cap", "assets", "sales", "income", "cash"]
+# ── v7.0: Dynamic field loading from datasets.py ──────────────────
+# Fields are loaded from the team datasets Excel at startup.
+# If the Excel is unavailable, built-in fallbacks are used.
+from datasets import (
+    get_fundamental_fields, get_deep_fundamental_fields, get_analyst_fields,
+    get_sentiment_fields, get_fscore_fields, get_derivative_fields,
+    get_options_windows, get_pcr_windows, get_model77_fields,
+)
 
-DEEP_FUNDAMENTAL_FIELDS = [
-    "cashflow_op", "ebit", "ebitda", "enterprise_value",
-    "bookvalue_ps", "debt", "equity", "current_ratio",
-    "eps", "capex", "cashflow", "cogs", "cash_st",
-]
+FUNDAMENTAL_FIELDS = get_fundamental_fields()
+DEEP_FUNDAMENTAL_FIELDS = get_deep_fundamental_fields()
+ANALYST_FIELDS = get_analyst_fields()
+SENTIMENT_FIELDS = get_sentiment_fields()
+FSCORE_FIELDS = get_fscore_fields()
+DERIVATIVE_FIELDS = get_derivative_fields()
+OPTIONS_WINDOWS = get_options_windows()
+PCR_WINDOWS = get_pcr_windows()
 
-ANALYST_FIELDS = [
-    "snt1_d1_earningssurprise", "snt1_d1_netearningsrevision",
-    "snt1_d1_dynamicfocusrank", "consensus_analyst_rating",
-    "snt1_d1_earningsrevision", "snt1_d1_stockrank",
-]
+# Model77 fields — curated tiers for template sampling
+# The full 3,241 field pool is available to the LLM, but template {model77_field}
+# sampling needs tight tiers to avoid wasting sims.
+_model77_all = get_model77_fields()
 
-SENTIMENT_FIELDS = ["scl12_buzz", "scl12_sentiment", "snt_social_value"]
-
-FSCORE_FIELDS = [
-    "fscore_bfl_value", "fscore_bfl_momentum", "fscore_bfl_quality",
-    "fscore_bfl_growth", "fscore_bfl_profitability", "fscore_bfl_total",
-]
-
-DERIVATIVE_FIELDS = [
-    "cashflow_efficiency_rank_derivative",
-    "composite_factor_score_derivative",
-    "earnings_certainty_rank_derivative",
-    "growth_potential_rank_derivative",
-    "analyst_revision_rank_derivative",
-    "relative_valuation_rank_derivative",
-]
-
-OPTIONS_WINDOWS = [30, 60, 90, 120, 180]
-PCR_WINDOWS = [10, 30, 60, 90, 120, 180, 270]
-
-# v5.9: model77 pre-computed anomaly fields — Tier 1 (highest expected impact)
+# Tier 1: PROVEN high-impact fields (same as v6.2.1 — hand-curated from research)
 MODEL77_TIER1_FIELDS = [
     "standardized_unexpected_earnings", "standardized_unexpected_earnings_2",
     "earnings_momentum_composite_score", "earnings_momentum_analyst_score",
@@ -619,7 +609,12 @@ MODEL77_TIER1_FIELDS = [
     "value_momentum_analyst_score", "momentum_analyst_composite_score",
     "price_momentum_module_score", "fundamental_growth_module_score",
 ]
+# Filter to only fields that actually exist in the loaded dataset
+if _model77_all:
+    _available = set(_model77_all)
+    MODEL77_TIER1_FIELDS = [f for f in MODEL77_TIER1_FIELDS if f in _available]
 
+# Tier 2: Secondary proven fields
 MODEL77_TIER2_FIELDS = [
     "trailing_twelve_month_accruals",
     "standardized_unexpected_cash_flow", "standardized_unexpected_cashflow",
@@ -638,10 +633,16 @@ MODEL77_TIER2_FIELDS = [
     "cash_burn_rate", "inventory_change_avg_assets",
     "rd_expense_to_sales_2", "visibility_ratio", "treynor_ratio",
 ]
+if _model77_all:
+    MODEL77_TIER2_FIELDS = [f for f in MODEL77_TIER2_FIELDS if f in _available]
 
-MODEL77_ALL_FIELDS = MODEL77_TIER1_FIELDS + MODEL77_TIER2_FIELDS
+# If we have the full dataset, add remaining fields as a low-probability exploration pool
+# The generator samples: 70% tier1, 25% tier2, 5% tier3 (exploration)
+_curated = set(MODEL77_TIER1_FIELDS + MODEL77_TIER2_FIELDS)
+MODEL77_TIER3_FIELDS = [f for f in _model77_all if f not in _curated] if _model77_all else []
 
-# Direction: fields where HIGHER value = LOWER expected returns (need -rank)
+MODEL77_ALL_FIELDS = MODEL77_TIER1_FIELDS + MODEL77_TIER2_FIELDS + MODEL77_TIER3_FIELDS
+
 MODEL77_NEGATIVE_DIRECTION = {
     "asset_growth_rate", "one_year_change_total_assets",
     "trailing_twelve_month_accruals", "twelve_month_total_debt_change_2",
@@ -694,4 +695,18 @@ DATASET_NEUTRALIZATION = {
     "fn_financial": ["INDUSTRY", "SUBINDUSTRY", "MARKET"],
     "fundamental_vol": ["INDUSTRY", "SUBINDUSTRY", "MARKET"],
     "simple_ratio": ["SUBINDUSTRY", "INDUSTRY", "MARKET", "SECTOR"],
+    # v7.0: Added missing families (were falling back to DEFAULT_NEUTRALIZATIONS)
+    "vector_data": ["SUBINDUSTRY", "MARKET"],
+    "supply_chain": ["SUBINDUSTRY", "INDUSTRY"],
+    "ravenpack_cat": ["SUBINDUSTRY", "MARKET", "INDUSTRY"],
+    "options_analytics": ["MARKET", "SECTOR", "INDUSTRY"],
+    "hist_vol": ["MARKET", "SECTOR"],
+    "fscore": ["INDUSTRY", "SUBINDUSTRY", "MARKET"],
+    "risk_metrics": ["MARKET", "INDUSTRY", "SUBINDUSTRY"],
+    "intraday_pattern": ["SECTOR", "MARKET"],
+    "analyst_deep": ["INDUSTRY", "SUBINDUSTRY"],
+    "social_scalar": ["SUBINDUSTRY", "MARKET"],
+    "wild_combos": ["MARKET", "INDUSTRY", "SUBINDUSTRY"],
+    "tutorial_proven": ["MARKET", "INDUSTRY", "SECTOR"],
+    "high_sharpe": ["SUBINDUSTRY", "INDUSTRY", "MARKET"],
 }

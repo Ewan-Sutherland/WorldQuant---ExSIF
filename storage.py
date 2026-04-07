@@ -964,3 +964,33 @@ class Storage:
                 (candidate_id, run_id, expression, core_signal, family, template_id,
                  sharpe, fitness, turnover, settings_json),
             )
+
+    # ── v7.0: Bot state stubs (no-op for SQLite — team features need Supabase) ──
+
+    def save_bot_state(self, status="stopped", completion_count=0,
+                       interrupted_refinement_ids=None, interrupted_optuna_ids=None):
+        pass  # SQLite doesn't support team features
+
+    def get_bot_state(self):
+        return None
+
+    def heartbeat(self):
+        pass
+
+    def get_own_unconsumed_refinement_count(self):
+        return 0
+
+    def un_consume_refinement(self, candidate_id):
+        pass
+
+    def mark_runs_interrupted(self, run_ids):
+        pass
+
+    def log_activity(self, **kwargs):
+        pass
+
+    def update_dashboard(self, **kwargs):
+        pass
+
+    def prune_activity_log(self, max_per_owner=2000):
+        pass

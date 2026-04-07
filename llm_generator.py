@@ -242,6 +242,16 @@ VALID_FIELDS.update({
     "snt_buzz", "snt_buzz_fast_d1", "snt_buzz_bfl", "snt_buzz_bfl_fast_d1",
 })
 
+# v7.0: Merge in ALL fields from the team datasets Excel
+# This ensures LLM-generated expressions can use any field the team has access to
+try:
+    from datasets import get_all_valid_fields
+    _dynamic_fields = get_all_valid_fields()
+    VALID_FIELDS.update(_dynamic_fields)
+    logger.info(f"[LLM_FIELDS] Loaded {len(_dynamic_fields)} dynamic fields from datasets")
+except Exception as _e:
+    logger.info(f"[LLM_FIELDS] Using hardcoded fields only: {_e}")
+
 
 # ── Operators ───────────────────────────────────────────────────────
 
@@ -291,6 +301,9 @@ BANNED_OPERATORS = {
     "last_diff_value",     # needs lookback param we don't provide
     "days_from_last_change",  # needs lookback param we don't provide
 }
+
+# v7.0: Clean up — remove banned fields from valid set to avoid conflicts
+VALID_FIELDS -= BANNED_FIELDS
 
 
 # ── Comprehensive system prompt ─────────────────────────────────────
