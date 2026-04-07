@@ -61,11 +61,14 @@ class Storage:
             return []
         return r.json()
 
-    def _post(self, table: str, data: dict, upsert: bool = False) -> dict | None:
+    def _post(self, table: str, data: dict, upsert: bool = False, on_conflict: str = "") -> dict | None:
         headers = dict(self.headers)
+        url = f"{self.base}/{table}"
         if upsert:
             headers["Prefer"] = "resolution=merge-duplicates,return=representation"
-        r = requests.post(f"{self.base}/{table}", headers=headers, json=data)
+            if on_conflict:
+                url += f"?on_conflict={on_conflict}"
+        r = requests.post(url, headers=headers, json=data)
         if r.status_code not in (200, 201):
             logger.warning(f"POST {table} failed: {r.status_code} {r.text[:300]}")
             return None
@@ -352,6 +355,13 @@ class Storage:
     def get_submitted_candidate_rows(self, *, limit: int = 300) -> list[dict]:
         try:
             return self._rpc("get_submitted_candidates", {"row_limit": limit, "owner_filter": self.owner})
+        except Exception:
+            return self._rpc("get_submitted_candidates", {"row_limit": limit})
+
+    def get_all_team_submissions(self, *, limit: int = 500) -> list[dict]:
+        """Get ALL team submissions (no owner filter) for cross-bot correlation checks."""
+        try:
+            return self._rpc("get_submitted_candidates", {"row_limit": limit, "owner_filter": None})
         except Exception:
             return self._rpc("get_submitted_candidates", {"row_limit": limit})
 

@@ -138,15 +138,19 @@ class AlphaBot:
         v6.0.1: Load session state from database so knowledge persists across
         restarts and across team members sharing the same Supabase backend.
         """
-        # 1. Load passed cores from submitted alphas (count per core)
+        # 1. Load passed cores from ALL TEAM submitted alphas (count per core)
+        # v7.0: Uses team-wide submissions so we don't duplicate teammates' alphas
         try:
-            submitted_rows = self.storage.get_submitted_candidate_rows(limit=500)
+            try:
+                submitted_rows = self.storage.get_all_team_submissions(limit=500)
+            except Exception:
+                submitted_rows = self.storage.get_submitted_candidate_rows(limit=500)
             for row in submitted_rows:
                 core = self._extract_core_signal(row.get("canonical_expression", ""))
                 if core:
                     self.passed_cores[core] = self.passed_cores.get(core, 0) + 1
             if self.passed_cores:
-                print(f"[WARM_START] Loaded {len(self.passed_cores)} passed cores from submitted alphas")
+                print(f"[WARM_START] Loaded {len(self.passed_cores)} passed cores from team submissions")
         except Exception as exc:
             print(f"[WARM_START] Failed to load passed cores: {exc}")
 
@@ -1134,7 +1138,12 @@ class AlphaBot:
           2. Same data source category → BLOCK unless Sharpe 10%+ better
           3. Different data source category → ALLOW (near-zero PnL correlation)
         """
-        submitted_rows = self.storage.get_submitted_candidate_rows(limit=300)
+        # v7.0: Check against ALL team submissions — if a teammate already submitted
+        # this core signal, duplicating it on our account adds zero portfolio value.
+        try:
+            submitted_rows = self.storage.get_all_team_submissions(limit=500)
+        except Exception:
+            submitted_rows = self.storage.get_submitted_candidate_rows(limit=300)
 
         if not submitted_rows:
             return {"fits": True, "max_similarity": 0.0, "reason": "no_prior_submissions"}

@@ -989,6 +989,9 @@ class Storage:
     def log_activity(self, **kwargs):
         pass
 
+    def get_all_team_submissions(self, *, limit=500):
+        return []
+
     def update_dashboard(self, **kwargs):
         pass
 

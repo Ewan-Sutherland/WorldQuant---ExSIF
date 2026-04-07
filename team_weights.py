@@ -77,7 +77,7 @@ class TeamWeights:
                 "avg_turnover": row.get("avg_turnover"),
                 "submit_rate": row.get("submit_rate"),
                 "updated_at": now,
-            }, upsert=True)
+            }, upsert=True, on_conflict="owner,stat_type,stat_key")
 
     def _publish_template_stats(self) -> None:
         try:
@@ -99,7 +99,7 @@ class TeamWeights:
                 "avg_fitness": row.get("avg_fitness"),
                 "avg_turnover": row.get("avg_turnover"),
                 "updated_at": now,
-            }, upsert=True)
+            }, upsert=True, on_conflict="owner,stat_type,stat_key")
 
     # ── Reading team aggregate ────────────────────────────────────
 
