@@ -566,17 +566,19 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
     # of producing alphas uncorrelated with the existing 46 submissions.
 
     # nws18_* event fields — 14 completely untouched fields
+    # NOTE: nws18 are EVENT inputs — ts_backfill and ts_sum both fail on events.
+    # Use raw field access (platform auto-aggregates events) or vec operators.
     "news_event_signal": [
-        {"template_id": "ne_01", "expression": "rank(ts_backfill({news_event_field}, 60))"},
-        {"template_id": "ne_02", "expression": "-rank(ts_backfill({news_event_field}, 60))"},
-        {"template_id": "ne_03", "expression": "rank(ts_zscore(ts_backfill({news_event_field}, 60), {n}))"},
-        {"template_id": "ne_04", "expression": "rank(ts_delta(ts_backfill({news_event_field}, 60), {n}))"},
-        {"template_id": "ne_05", "expression": "ts_decay_linear(rank(ts_backfill({news_event_field}, 60)), {n})"},
-        {"template_id": "ne_06", "expression": "group_rank(ts_backfill({news_event_field}, 60), industry)"},
-        {"template_id": "ne_07", "expression": "rank(ts_backfill({news_event_field}, 60)) * rank(-returns)"},
-        {"template_id": "ne_08", "expression": "rank(ts_backfill({news_event_field}, 60)) * rank(adv20)"},
-        {"template_id": "ne_09", "expression": "rank(ts_backfill({news_event_field}, 60) * -ts_zscore(returns, {n}))"},
-        {"template_id": "ne_10", "expression": "trade_when(ts_backfill({news_event_field}, 60) > 0, rank(-returns), -1)"},
+        {"template_id": "ne_01", "expression": "rank({news_event_field})"},
+        {"template_id": "ne_02", "expression": "-rank({news_event_field})"},
+        {"template_id": "ne_03", "expression": "rank(ts_zscore({news_event_field}, {n}))"},
+        {"template_id": "ne_04", "expression": "rank(ts_delta({news_event_field}, {n}))"},
+        {"template_id": "ne_05", "expression": "ts_decay_linear(rank({news_event_field}), {n})"},
+        {"template_id": "ne_06", "expression": "group_rank({news_event_field}, industry)"},
+        {"template_id": "ne_07", "expression": "rank({news_event_field}) * rank(-returns)"},
+        {"template_id": "ne_08", "expression": "rank({news_event_field}) * rank(adv20)"},
+        {"template_id": "ne_09", "expression": "rank({news_event_field} * -ts_zscore(returns, {n}))"},
+        {"template_id": "ne_10", "expression": "trade_when({news_event_field} > 0, rank(-returns), -1)"},
     ],
 
     # Underused RavenPack categories — ~50 fields the LLM never generates
@@ -608,13 +610,54 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
     # Cross-dimension: model77 × event/options — structural combinations too complex for combiner
     "cross_dimension": [
         {"template_id": "xd_01", "expression": "rank({model77_field}) * rank(ts_backfill({rp_field}, 60))"},
-        {"template_id": "xd_02", "expression": "rank({model77_field}) * rank(ts_backfill({news_event_field}, 60))"},
+        {"template_id": "xd_02", "expression": "rank({model77_field}) * rank({news_event_field})"},
         {"template_id": "xd_03", "expression": "rank({model77_field}) * rank({derivative_field})"},
         {"template_id": "xd_04", "expression": "rank(ts_backfill({rp_field}, 60)) * rank({derivative_field})"},
         {"template_id": "xd_05", "expression": "rank(ts_backfill({rp_field}, 60)) * rank(ts_backfill(implied_volatility_call_120, 60) - ts_backfill(implied_volatility_put_120, 60))"},
-        {"template_id": "xd_06", "expression": "rank(ts_backfill({news_event_field}, 60)) * rank({derivative_field}) * rank(adv20)"},
+        {"template_id": "xd_06", "expression": "rank({news_event_field}) * rank({derivative_field}) * rank(adv20)"},
         {"template_id": "xd_07", "expression": "group_rank({model77_field}, industry) * rank(ts_backfill({rp_field}, 60))"},
         {"template_id": "xd_08", "expression": "rank({model77_field} * ts_backfill({rp_field}, 60)) + rank(-ts_mean(returns, {m}))"},
+    ],
+
+    # ── v7.1: VOLATILITY-GATED TEMPLATES — rescue S=1.0-1.2 near-passers ──
+    # trade_when(vol_condition, alpha, -1) reduces turnover and focuses on
+    # high-information periods, often pushing S from 1.0-1.2 to 1.25+
+    "vol_gated": [
+        # Gate common alpha patterns by vol regime
+        {"template_id": "vg_01", "expression": "trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.5, rank(-returns), -1)"},
+        {"template_id": "vg_02", "expression": "trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.5, rank(-(close - vwap) / (vwap + 0.001)), -1)"},
+        {"template_id": "vg_03", "expression": "trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.5, rank(-ts_zscore(returns, {n})), -1)"},
+        {"template_id": "vg_04", "expression": "trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.5, rank({deep_field} / cap), -1)"},
+        {"template_id": "vg_05", "expression": "trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.5, rank(-ts_mean(returns, {n})) * rank(adv20), -1)"},
+        {"template_id": "vg_06", "expression": "trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.5, rank(ts_rank({deep_field} / cap, 252)), -1)"},
+        {"template_id": "vg_07", "expression": "trade_when(volume > ts_mean(volume, 20), rank(-ts_zscore(returns, {n})) * rank(cap), -1)"},
+        {"template_id": "vg_08", "expression": "trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.5, group_rank(-ts_zscore(close, {n}), subindustry), -1)"},
+        {"template_id": "vg_09", "expression": "trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.5, rank({derivative_field}) * rank(-returns), -1)"},
+        {"template_id": "vg_10", "expression": "trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.55, rank(ts_backfill({rp_field}, 60)) * rank(-returns), -1)"},
+    ],
+
+    # ── v7.1.1: ACCRUALS & QUALITY — academic factor zoo signals ──
+    "accruals_quality": [
+        {"template_id": "aq_01", "expression": "rank(cashflow_op / assets - operating_income / assets)"},
+        {"template_id": "aq_02", "expression": "rank(ts_delta(cashflow_op / assets, 252) - ts_delta(operating_income / assets, 252))"},
+        {"template_id": "aq_03", "expression": "-rank(ts_delta(assets, 252) / (assets + 0.001))"},
+        {"template_id": "aq_04", "expression": "-rank(ts_delta(sharesout, 252) / (sharesout + 0.001))"},
+        {"template_id": "aq_05", "expression": "rank(cashflow_op / (operating_income + 0.001))"},
+        {"template_id": "aq_06", "expression": "rank(ts_corr(cashflow_op / cap, operating_income / cap, 252))"},
+        {"template_id": "aq_07", "expression": "-rank(ts_zscore(assets, 252))"},
+        {"template_id": "aq_08", "expression": "rank(cashflow_op / cap) - rank(operating_income / cap)"},
+        {"template_id": "aq_09", "expression": "group_rank(cashflow_op / assets - operating_income / assets, industry)"},
+        {"template_id": "aq_10", "expression": "rank(ts_rank(cashflow_op / assets - income / assets, 252))"},
+    ],
+
+    # ── v7.1.1: IV TERM STRUCTURE — options implied vol signals ──
+    "iv_term_structure": [
+        {"template_id": "ivt_01", "expression": "rank(ts_backfill(implied_volatility_call_60, 60) / (ts_backfill(implied_volatility_call_270, 60) + 0.001))"},
+        {"template_id": "ivt_02", "expression": "rank(ts_backfill(implied_volatility_call_30, 60) - ts_backfill(implied_volatility_call_120, 60))"},
+        {"template_id": "ivt_03", "expression": "rank(ts_delta(ts_backfill(implied_volatility_call_60, 60) / (historical_volatility_60 + 0.001), {n}))"},
+        {"template_id": "ivt_04", "expression": "rank(ts_backfill(implied_volatility_put_60, 60) / (ts_backfill(implied_volatility_call_60, 60) + 0.001) - 1)"},
+        {"template_id": "ivt_05", "expression": "rank(ts_zscore(ts_backfill(implied_volatility_call_60, 60) - historical_volatility_60, {n}))"},
+        {"template_id": "ivt_06", "expression": "rank(ts_backfill(implied_volatility_call_60, 60) / (historical_volatility_60 + 0.001)) * rank(-returns)"},
     ],
 }
 
@@ -787,4 +830,8 @@ DATASET_NEUTRALIZATION = {
     "rp_category_fresh": ["SUBINDUSTRY", "MARKET", "INDUSTRY"],
     "derivative_interaction": ["INDUSTRY", "SUBINDUSTRY", "MARKET"],
     "cross_dimension": ["INDUSTRY", "SUBINDUSTRY", "MARKET"],
+    "vol_gated": ["MARKET", "SECTOR", "NONE"],
+    # v7.1.1: Academic factor zoo + IV term structure
+    "accruals_quality": ["INDUSTRY", "SUBINDUSTRY", "MARKET"],
+    "iv_term_structure": ["MARKET", "SECTOR", "INDUSTRY"],
 }

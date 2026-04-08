@@ -110,7 +110,7 @@ AUTO_SUBMIT = False
 # The pipeline re-checks all scores, groups by core signal, submits greedily.
 # Set your schedule here or let it auto-assign based on alphabetical order.
 SUBMIT_SCHEDULE = {
-    "ewansutherland@icloud.com": [5, 17],   # 5am and 5pm UTC
+    # "ewansutherland@icloud.com": [5, 17],   # 5am and 5pm UTC
     # "gmpc201@exeter.ac.uk": [6, 18],         # 6am and 6pm UTC
     # "tns203@exeter.ac.uk": [7, 19],           # 7am and 7pm UTC
     # "lucacroci2005@gmail.com": [8, 20],       # 8am and 8pm UTC
@@ -247,6 +247,7 @@ FAMILY_BASE_WEIGHTS = {
     "rp_category_fresh": 5.00,  # ~50 rp_css/rp_ess/rp_nip fields LLM never generates
     "derivative_interaction": 4.00,  # derivative_scores × price/vol cross-signals
     "cross_dimension": 4.00,    # model77 × events/options structural combos
+    "vol_gated": 5.00,          # trade_when(vol_regime, alpha) — rescues S=1.0-1.2 near-passers
 }
 
 TEMPLATE_BASE_WEIGHTS = {

@@ -798,6 +798,25 @@ class AlphaBot:
             or result.get("raw", {}).get("alpha")
         )
 
+    def _extract_fields_from_expr(self, expression: str) -> list[str]:
+        """v7.1: Extract data field names from an expression for correlation hurdle."""
+        import re
+        # Match word tokens that look like data fields (not operators/numbers/keywords)
+        operators = {
+            "rank", "ts_rank", "ts_zscore", "ts_delta", "ts_mean", "ts_std_dev",
+            "ts_decay_linear", "ts_corr", "ts_regression", "ts_sum", "ts_backfill",
+            "ts_delay", "ts_av_diff", "ts_arg_max", "ts_arg_min", "ts_step",
+            "ts_product", "ts_min", "ts_max",
+            "group_rank", "group_zscore", "group_neutralize", "group_vector_neut",
+            "zscore", "winsorize", "trade_when", "hump", "scale", "log", "abs",
+            "max", "min", "power", "vec_avg", "vec_sum", "vec_count",
+            "bucket", "quantile", "range", "subindustry", "industry", "sector",
+            "market", "rank", "returns", "close", "open", "high", "low",
+            "volume", "vwap", "cap", "adv20",
+        }
+        tokens = re.findall(r'[a-z][a-z0-9_]+', expression.lower())
+        return [t for t in tokens if t not in operators and len(t) > 3 and not t.isdigit()]
+
     def _optimize_and_submit(self, candidate_id: str, run_id: str, result: dict, metrics) -> None:
         """
         v6.2: Smart submission pipeline.
@@ -831,6 +850,26 @@ class AlphaBot:
             )
             return
 
+        # v7.1: Correlation hurdle pre-check — if this expression's fields overlap
+        # heavily with multiple existing submissions, it's almost certainly going to
+        # fail self-correlation. Skip the expensive API check.
+        if not is_sweep and self.passed_cores:
+            expr_fields = set(self._extract_fields_from_expr(expression))
+            if expr_fields:
+                high_overlap_count = 0
+                for sub_core in self.passed_cores:
+                    sub_fields = set(self._extract_fields_from_expr(sub_core))
+                    if sub_fields and expr_fields:
+                        overlap = len(expr_fields & sub_fields) / max(len(expr_fields), 1)
+                        if overlap >= 0.8:
+                            high_overlap_count += 1
+                if high_overlap_count >= 3:
+                    print(
+                        f"[CORR_HURDLE_SKIP] run_id={run_id} — fields overlap ≥80% with "
+                        f"{high_overlap_count} existing submissions, likely self-corr fail"
+                    )
+                    return
+
         # ── Step 1: Check self-correlation ONLY (the only gate) ──
         alpha_id = self._extract_alpha_id(result)
         if not alpha_id:
@@ -855,10 +894,32 @@ class AlphaBot:
                     print(f"  ⚠️ Check timed out (attempt {attempt+1}/3), retrying...")
                     import time; time.sleep(5)
                 else:
-                    print(f"[OPTIMIZE_TIMEOUT] Check failed after 3 attempts: {exc}\n{'='*60}\n")
-                    return
+                    print(f"[OPTIMIZE_TIMEOUT] Check failed after 3 attempts: {exc}")
 
-        if check is None:
+        # v7.1: If check failed or self-corr still PENDING, stage as unverified
+        # instead of silently dropping. The submit pipeline retry will re-check.
+        if check is None or check.get("_passed") is None:
+            reason = "api_timeout" if check is None else "self_corr_pending"
+            self.storage.insert_ready_alpha(
+                candidate_id=candidate_id,
+                run_id=run_id,
+                alpha_id=alpha_id,
+                expression=expression,
+                core_signal=core or "",
+                family=family,
+                template_id=candidate_row.get("template_id", ""),
+                sharpe=metrics.sharpe,
+                fitness=metrics.fitness,
+                turnover=metrics.turnover,
+                score_before=None, score_after=None, score_change=None,
+                settings_json=candidate_row.get("settings_json", "{}"),
+                variant_desc=f"original (unverified: {reason})",
+                status="unverified",
+            )
+            print(
+                f"  ⚠️ Self-corr {reason} — staged as unverified for retry\n"
+                f"{'='*60}\n"
+            )
             return
 
         if check["_passed"] is False:
@@ -869,10 +930,6 @@ class AlphaBot:
                 f"(corr={check['_self_correlation']}, with={check['_correlated_with']})\n"
                 f"{'='*60}\n"
             )
-            return
-
-        if check["_passed"] is None:
-            print(f"[OPTIMIZE_CORR_TIMEOUT] ⚠️ Check timed out, skipping\n{'='*60}\n")
             return
 
         print(f"  ✅ Self-correlation PASSED — expression is viable, optimising settings...")

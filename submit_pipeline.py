@@ -51,6 +51,9 @@ class SubmitPipeline:
         print(f"  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
         print(f"{'='*60}\n")
 
+        # Step 0: Retry unverified alphas — promote to 'ready' if score available
+        self._retry_unverified()
+
         # Step 1: Load all ready alphas for this owner
         alphas = self._load_ready_alphas()
         if not alphas:
@@ -138,6 +141,95 @@ class SubmitPipeline:
         except Exception as e:
             print(f"  ERROR loading ready_alphas: {e}")
             return []
+
+    def _load_unverified_alphas(self) -> list[dict]:
+        """Load unverified alphas for this owner."""
+        try:
+            rows = self.storage._get("ready_alphas", {
+                "owner": f"eq.{self.owner}",
+                "status": "eq.unverified",
+                "select": "*",
+                "order": "sharpe.desc",
+            })
+            return rows or []
+        except Exception as e:
+            print(f"  ERROR loading unverified alphas: {e}")
+            return []
+
+    def _retry_unverified(self) -> None:
+        """
+        v7.1: Retry unverified alphas — check self-corr and before-after score.
+        Promote to 'ready' if self-corr passes, reject if self-corr fails or score negative.
+        """
+        unverified = self._load_unverified_alphas()
+        if not unverified:
+            return
+
+        print(f"  Retrying {len(unverified)} unverified alphas...")
+        promoted = 0
+        rejected = 0
+
+        for a in unverified:
+            alpha_id = a.get("alpha_id")
+            if not alpha_id:
+                continue
+
+            # Step 1: Check self-correlation first
+            try:
+                check = self.client.check_alpha(alpha_id)
+            except Exception:
+                print(f"    ⏳ API timeout S={a.get('sharpe',0):.2f}")
+                time.sleep(self.DELAY_BETWEEN_CHECKS)
+                continue
+
+            if check.get("_passed") is False:
+                self._mark_status(a, "rejected",
+                    f"self_corr_fail: corr={check.get('_self_correlation')} with={check.get('_correlated_with')}")
+                rejected += 1
+                print(f"    ❌ SELF-CORR FAILED S={a.get('sharpe',0):.2f} corr={check.get('_self_correlation')}")
+                time.sleep(self.DELAY_BETWEEN_CHECKS)
+                continue
+
+            if check.get("_passed") is None:
+                print(f"    ⏳ Self-corr still pending S={a.get('sharpe',0):.2f}")
+                time.sleep(self.DELAY_BETWEEN_CHECKS)
+                continue
+
+            # Step 2: Self-corr passed — check before-after score
+            score = None
+            for attempt in range(3):
+                try:
+                    perf = self.client.check_before_after_performance(
+                        alpha_id, competition_id=self.config.IQC_COMPETITION_ID,
+                    )
+                    score = perf.get("_score_change")
+                    if score is not None:
+                        break
+                except Exception:
+                    pass
+                if attempt < 2:
+                    time.sleep(self.DELAY_BETWEEN_CHECKS)
+
+            if score is not None and score >= self.MIN_SCORE_TO_SUBMIT:
+                self._mark_status(a, "ready", f"retry_promoted: score={score:+.0f}")
+                promoted += 1
+                print(f"    ✅ PROMOTED S={a.get('sharpe',0):.2f} score={score:+.0f} → ready")
+            elif score is not None and score < 0:
+                self._mark_status(a, "rejected", f"retry_negative: score={score:+.0f}")
+                rejected += 1
+                print(f"    ❌ REJECTED S={a.get('sharpe',0):.2f} score={score:+.0f}")
+            else:
+                # Self-corr passed but score unavailable — promote anyway
+                # The main pipeline will re-check score before submitting
+                self._mark_status(a, "ready", f"self_corr_passed_score_unknown")
+                promoted += 1
+                print(f"    ✅ PROMOTED (self-corr passed, score pending) S={a.get('sharpe',0):.2f} → ready")
+
+            time.sleep(self.DELAY_BETWEEN_CHECKS)
+
+        if promoted or rejected:
+            print(f"  Unverified retry: {promoted} promoted, {rejected} rejected, "
+                  f"{len(unverified) - promoted - rejected} still pending\n")
 
     # ── Score checking ────────────────────────────────────────────
 

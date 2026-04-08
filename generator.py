@@ -54,6 +54,9 @@ DEFAULT_BASE_FAMILY_WEIGHTS = {
 class AlphaGenerator:
     def __init__(self, seed: int | None = None):
         self.rng = random.Random(seed)
+        # v7.1: Data category rotation tracking
+        self._category_usage = {cat: 0 for cat in self.DATA_CATEGORIES}
+        self._generation_count = 0
 
     # ============================
     # PUBLIC
@@ -380,6 +383,33 @@ class AlphaGenerator:
     # SAMPLING
     # ============================
 
+    # v7.1: Data category rotation — cycle through different data dimensions
+    # to maximize decorrelation. Groups families by data source.
+    DATA_CATEGORIES = {
+        "price_technical": {"mean_reversion", "cross_sectional", "liquidity_scaled", "conditional",
+                           "vol_adjusted", "volatility", "intraday", "intraday_pattern", "vol_gated",
+                           "momentum", "volume_flow", "price_vol_corr"},
+        "fundamental": {"fundamental_value", "quality_trend", "size_value", "simple_ratio",
+                       "expanded_fundamental", "fundamental_vol", "fn_financial", "fundamental",
+                       "fscore", "accruals_quality"},
+        "analyst_sentiment": {"earnings_momentum", "analyst_estimates", "analyst_sentiment",
+                             "analyst_deep", "fundamental_scores"},
+        "news_alt": {"news_sentiment", "ravenpack_cat", "rp_category_fresh", "news_event_signal",
+                    "vector_data", "social_scalar", "sentiment", "relationship"},
+        "options": {"options_vol", "options_analytics", "hist_vol", "iv_term_structure"},
+        "model_supply": {"model77_anomaly", "model77_combo", "supply_chain", "risk_beta",
+                        "risk_metrics", "derivative_interaction", "cross_dimension"},
+        "combo_proven": {"signal_combo", "combo_factor", "wild_combos", "vol_regime",
+                        "wq_proven", "tutorial_proven", "high_sharpe", "evolved",
+                        "griff_multi_factor", "griff_intraday"},
+    }
+
+    # Reverse lookup: family → category
+    _FAMILY_TO_CATEGORY = {}
+    for _cat, _fams in DATA_CATEGORIES.items():
+        for _f in _fams:
+            _FAMILY_TO_CATEGORY[_f] = _cat
+
     def _sample_family(self, bias):
         fams = list(TEMPLATE_LIBRARY.keys())
         if hasattr(config, "DEFAULT_FAMILY_ORDER"):
@@ -394,8 +424,21 @@ class AlphaGenerator:
             blocked = set()
 
         config_weights = getattr(config, "FAMILY_BASE_WEIGHTS", {})
-        weights = []
 
+        # v7.1: Data category rotation — boost underused categories
+        self._generation_count += 1
+        cat_boost = {}
+        if self._generation_count > 5:
+            total_usage = max(sum(self._category_usage.values()), 1)
+            for cat, count in self._category_usage.items():
+                # Inverse frequency boost: less-used categories get higher weight
+                expected = total_usage / len(self._category_usage)
+                if count < expected * 0.5:
+                    cat_boost[cat] = 2.0  # Strong boost for neglected categories
+                elif count < expected * 0.8:
+                    cat_boost[cat] = 1.3  # Mild boost
+
+        weights = []
         for fam in fams:
             if fam in blocked:
                 weights.append(0.0)
@@ -405,9 +448,20 @@ class AlphaGenerator:
                 base *= float(config_weights[fam])
             if bias:
                 base *= bias.get(fam, 1.0)
+            # Apply category rotation boost
+            cat = self._FAMILY_TO_CATEGORY.get(fam, "")
+            if cat in cat_boost:
+                base *= cat_boost[cat]
             weights.append(max(base, 0.001))
 
-        return self.rng.choices(fams, weights=weights, k=1)[0]
+        chosen = self.rng.choices(fams, weights=weights, k=1)[0]
+
+        # Track category usage
+        cat = self._FAMILY_TO_CATEGORY.get(chosen, "other")
+        if cat in self._category_usage:
+            self._category_usage[cat] = self._category_usage.get(cat, 0) + 1
+
+        return chosen
 
     def _sample_template(self, family, bias):
         templates = TEMPLATE_LIBRARY[family]
