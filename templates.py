@@ -64,14 +64,14 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
     ],
     "earnings_momentum": [
         {"template_id": "em_01", "expression": "rank(snt1_d1_netearningsrevision)"},
-        {"template_id": "em_02", "expression": "rank(ts_delta(snt1_d1_earningssurprise, {n}))"},
+        {"template_id": "em_02", "expression": "rank(ts_delta(snt1_d1_earningsrevision, {n}))"},
         {"template_id": "em_03", "expression": "rank(snt1_d1_dynamicfocusrank)"},
-        {"template_id": "em_04", "expression": "ts_decay_linear(rank(consensus_analyst_rating), {n})"},
+        {"template_id": "em_04", "expression": "ts_decay_linear(rank(snt1_d1_buyrecpercent), {n})"},
         {"template_id": "em_05", "expression": "rank(snt1_d1_stockrank)"},
         {"template_id": "em_06", "expression": "rank(ts_zscore(snt1_d1_netearningsrevision, {n}))"},
-        {"template_id": "em_07", "expression": "group_rank(snt1_d1_earningssurprise, subindustry)"},
-        {"template_id": "em_08", "expression": "rank(ts_decay_linear(snt1_d1_earningssurprise, 60))"},
-        {"template_id": "em_09", "expression": "rank(ts_decay_linear(snt1_d1_earningssurprise, 60)) + rank(ts_decay_linear(snt1_d1_netearningsrevision, 40))"},
+        {"template_id": "em_07", "expression": "group_rank(snt1_d1_earningsrevision, subindustry)"},
+        {"template_id": "em_08", "expression": "rank(ts_decay_linear(snt1_d1_earningsrevision, 60))"},
+        {"template_id": "em_09", "expression": "rank(ts_decay_linear(snt1_d1_earningsrevision, 60)) + rank(ts_decay_linear(snt1_d1_netearningsrevision, 40))"},
     ],
     "options_vol": [
         {"template_id": "opt_01", "expression": "rank(ts_backfill(implied_volatility_call_{opt_window}, 60) - ts_backfill(implied_volatility_put_{opt_window}, 60))"},
@@ -88,7 +88,7 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "opt_11", "expression": "group_rank(ts_backfill(implied_volatility_call_120, 60) / (ts_backfill(parkinson_volatility_120, 60) + 0.001), industry)"},
         # v6.2.1: IV/realized × fundamentals cross-category (the +48 winning pattern)
         {"template_id": "opt_12", "expression": "rank(ts_backfill(implied_volatility_call_120, 60) / (ts_backfill(parkinson_volatility_120, 60) + 0.001) * snt1_d1_netearningsrevision)"},
-        {"template_id": "opt_13", "expression": "rank(ts_backfill(implied_volatility_call_120, 60) / (ts_backfill(parkinson_volatility_120, 60) + 0.001) * forward_ebitda_to_enterprise_value_2)"},
+        {"template_id": "opt_13", "expression": "rank(ts_backfill(implied_volatility_call_120, 60) / (ts_backfill(parkinson_volatility_120, 60) + 0.001) * ebitda / (enterprise_value + 0.001))"},
         # v6.2.1: Options term structure (long vs short IV spread)
         {"template_id": "opt_14", "expression": "rank(ts_backfill(implied_volatility_call_120, 60) - ts_backfill(implied_volatility_call_30, 60))"},
         {"template_id": "opt_15", "expression": "rank((ts_backfill(implied_volatility_call_120, 60) - ts_backfill(implied_volatility_call_30, 60)) * rank(adv20))"},
@@ -163,14 +163,14 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "m7c_07", "expression": "rank(group_zscore({model77_field}, industry) * group_zscore(-returns, industry))"},
         {"template_id": "m7c_08", "expression": "rank(group_zscore({model77_field}, subindustry) * group_zscore(-ts_mean(returns, {m}), subindustry))"},
         # v5.9.1: Q-theory composite (Hou, Xue & Zhang — strongest academic signal)
-        {"template_id": "m7c_09", "expression": "rank(gross_profit_to_assets_ratio) - rank(asset_growth_rate)"},
-        {"template_id": "m7c_10", "expression": "rank(gross_profit_to_assets_ratio) - rank(asset_growth_rate) + rank(-ts_mean(returns, {m}))"},
-        {"template_id": "m7c_11", "expression": "group_rank(gross_profit_to_assets_ratio, subindustry) - group_rank(asset_growth_rate, subindustry)"},
+        {"template_id": "m7c_09", "expression": "rank((revenue - cogs) / (assets + 0.001)) - rank(asset_growth_rate)"},
+        {"template_id": "m7c_10", "expression": "rank((revenue - cogs) / (assets + 0.001)) - rank(asset_growth_rate) + rank(-ts_mean(returns, {m}))"},
+        {"template_id": "m7c_11", "expression": "group_rank((revenue - cogs) / (assets + 0.001), subindustry) - group_rank(asset_growth_rate, subindustry)"},
         # v5.9.1: Earnings quality × value (multiplicative model77 × model77)
-        {"template_id": "m7c_12", "expression": "rank(five_year_eps_stability * forward_ebitda_to_enterprise_value_2)"},
-        {"template_id": "m7c_13", "expression": "rank(five_year_eps_stability * forward_ebitda_to_enterprise_value_2) * rank(-ts_mean(returns, {m}))"},
+        {"template_id": "m7c_12", "expression": "rank(ts_std_dev(eps, 252) * ebitda / (enterprise_value + 0.001))"},
+        {"template_id": "m7c_13", "expression": "rank(ts_std_dev(eps, 252) * ebitda / (enterprise_value + 0.001)) * rank(-ts_mean(returns, {m}))"},
         # v5.9.1: 3-signal composites (weak signals → strong combined)
-        {"template_id": "m7c_14", "expression": "rank({model77_field}) + rank(gross_profit_to_assets_ratio) + rank(-ts_mean(returns, {m}))"},
+        {"template_id": "m7c_14", "expression": "rank({model77_field}) + rank((revenue - cogs) / (assets + 0.001)) + rank(-ts_mean(returns, {m}))"},
         {"template_id": "m7c_15", "expression": "rank({model77_field}) + rank(-asset_growth_rate) + rank(-ts_mean(returns, {m}))"},
         # v6.1: RAW MULTIPLICATIVE — rank(A * B) form (research: outperforms rank(A) + rank(B) and rank(A) * rank(B))
         {"template_id": "m7c_16", "expression": "rank({model77_field} * (-ts_mean(returns, {m})))"},
@@ -179,7 +179,7 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "m7c_19", "expression": "rank({model77_field} * ts_backfill(implied_volatility_mean_skew_30, 60))"},
         {"template_id": "m7c_20", "expression": "rank({model77_field} * snt1_d1_netearningsrevision)"},
         # v6.1: 3-signal with multiplicative pair + additive third
-        {"template_id": "m7c_21", "expression": "rank({model77_field} * gross_profit_to_assets_ratio) + rank(-ts_mean(returns, {m}))"},
+        {"template_id": "m7c_21", "expression": "rank({model77_field} * (revenue - cogs) / (assets + 0.001)) + rank(-ts_mean(returns, {m}))"},
         {"template_id": "m7c_22", "expression": "rank({model77_field} * (-asset_growth_rate)) + rank(-ts_mean(returns, {m}))"},
         # v6.1: GROUP_RANK of product — research: outperforms rank() for fundamentals 78% of the time
         {"template_id": "m7c_23", "expression": "group_rank({model77_field} * (-ts_mean(returns, {m})), industry)"},
@@ -194,7 +194,7 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "rel_03", "expression": "rank(ts_delta(rel_ret_cust, {n}))"},
         {"template_id": "rel_04", "expression": "rank(ts_zscore(rel_ret_cust, {n}))"},
         {"template_id": "rel_05", "expression": "rank(rel_ret_cust) * rank(rel_num_cust)"},
-        {"template_id": "rel_06", "expression": "rank(pv13_ustomergraphrank_page_rank) * rank(adv20)"},
+        {"template_id": "rel_06", "expression": "group_rank(pv13_ustomergraphrank_page_rank, sector) * rank(adv20)"},
         {"template_id": "rel_07", "expression": "rank(rel_ret_cust) + -rank(ts_mean(returns, {m}))"},
         {"template_id": "rel_08", "expression": "-rank(rel_ret_comp) + -rank(ts_mean(returns, {m}))"},
         # v5.9.1: Decayed customer momentum (Cohen & Frazzini 2008 — 150bp monthly)
@@ -212,9 +212,9 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "rb_06", "expression": "-rank(beta_last_60_days_spy) + rank({deep_field} / cap)"},
         {"template_id": "rb_07", "expression": "-rank(beta_last_60_days_spy) + -rank(ts_mean(returns, {m}))"},
         # v6.2.1: Cross-category beta × fundamentals (beta is genuinely different data)
-        {"template_id": "rb_08", "expression": "rank(-beta_last_60_days_spy * forward_ebitda_to_enterprise_value_2)"},
+        {"template_id": "rb_08", "expression": "rank(-beta_last_60_days_spy * ebitda / (enterprise_value + 0.001))"},
         {"template_id": "rb_09", "expression": "rank(-beta_last_60_days_spy) + rank(est_eps / close)"},
-        {"template_id": "rb_10", "expression": "rank(unsystematic_risk_last_60_days * gross_profit_to_assets_ratio)"},
+        {"template_id": "rb_10", "expression": "rank(unsystematic_risk_last_60_days * (revenue - cogs) / (assets + 0.001))"},
         {"template_id": "rb_11", "expression": "rank(-beta_last_60_days_spy * ts_backfill(implied_volatility_call_120, 60))"},
     ],
     "expanded_fundamental": [
@@ -290,7 +290,7 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "iday_04", "expression": "rank(open / close - 1)"},
         {"template_id": "iday_05", "expression": "-rank(ts_mean(open / close - 1, {n}))"},
         # v6.2.1: Intraday cross-category (genuinely different data from price returns)
-        {"template_id": "iday_06", "expression": "rank((close - open) / (high - low + 0.001) * snt1_d1_earningssurprise)"},
+        {"template_id": "iday_06", "expression": "rank((close - open) / (high - low + 0.001) * snt1_d1_earningsrevision)"},
         {"template_id": "iday_07", "expression": "rank(ts_zscore((high - low) / (close + 0.001), {n})) * rank(adv20)"},
         {"template_id": "iday_08", "expression": "group_rank((close - low) / (high - low + 0.001), industry)"},
     ],
@@ -305,8 +305,8 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "ans_03", "expression": "rank(ts_zscore({analyst_field}, {n}))"},
         # v6.2.1: Sentiment × reversion combos (cross-category, proven in +46 resim winner)
         {"template_id": "ans_04", "expression": "rank(ts_backfill(snt1_d1_netearningsrevision, 60) * -ts_mean(returns, {n}))"},
-        {"template_id": "ans_05", "expression": "rank(ts_backfill(snt1_d1_earningssurprise, 60) * forward_ebitda_to_enterprise_value_2)"},
-        {"template_id": "ans_06", "expression": "rank(ts_backfill(consensus_analyst_rating, 60) * -ts_mean((close - vwap) / vwap, {n}))"},
+        {"template_id": "ans_05", "expression": "rank(ts_backfill(snt1_d1_earningsrevision, 60) * ebitda / (enterprise_value + 0.001))"},
+        {"template_id": "ans_06", "expression": "rank(ts_backfill(snt1_d1_buyrecpercent, 60) * -ts_mean((close - vwap) / vwap, {n}))"},
     ],
 
     # ══════════════════════════════════════════════════════════════════
@@ -337,12 +337,12 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
     "supply_chain": [
         {"template_id": "sc_01", "expression": "rank(ts_mean(rel_ret_cust, {n}))"},
         {"template_id": "sc_02", "expression": "rank(ts_mean(rel_ret_comp, {n})) * rank(-returns)"},
-        {"template_id": "sc_03", "expression": "rank(pv13_com_page_rank) * rank(ts_rank(operating_income / cap, 252))"},
+        {"template_id": "sc_03", "expression": "group_rank(pv13_com_page_rank, sector) * rank(ts_rank(operating_income / cap, 252))"},
         {"template_id": "sc_04", "expression": "trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.5, rank(ts_mean(rel_ret_cust, {n})), -1)"},
         {"template_id": "sc_05", "expression": "rank(ts_mean(rel_ret_cust, {n}) - ts_mean(rel_ret_comp, {n}))"},
-        {"template_id": "sc_06", "expression": "rank(pv13_com_page_rank) * rank(forward_ebitda_to_enterprise_value_2)"},
+        {"template_id": "sc_06", "expression": "group_rank(pv13_com_page_rank, sector) * rank(ebitda / (enterprise_value + 0.001))"},
         {"template_id": "sc_07", "expression": "rank(ts_delta(rel_num_cust, {n}))"},
-        {"template_id": "sc_08", "expression": "rank(pv13_custretsig_retsig) * group_rank(ts_rank(est_eps / close, 60), industry)"},
+        {"template_id": "sc_08", "expression": "group_rank(pv13_custretsig_retsig, sector) * group_rank(ts_rank(est_eps / close, 60), industry)"},
     ],
 
     # RAVENPACK CATEGORY SENTIMENT — 75 fields, 0 submitted alphas
@@ -391,10 +391,10 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
     "risk_metrics": [
         {"template_id": "rm_01", "expression": "-rank(beta_last_60_days_spy)"},
         {"template_id": "rm_02", "expression": "rank(unsystematic_risk_last_60_days / (systematic_risk_last_60_days + 0.001))"},
-        {"template_id": "rm_03", "expression": "rank(beta_last_30_days_spy - beta_last_90_days_spy)"},
+        {"template_id": "rm_03", "expression": "rank(beta_last_30_days_spy - beta_last_60_days_spy)"},
         {"template_id": "rm_04", "expression": "-rank(ts_delta(correlation_last_60_days_spy, 20))"},
-        {"template_id": "rm_05", "expression": "-rank(beta_last_60_days_spy) * rank(forward_ebitda_to_enterprise_value_2)"},
-        {"template_id": "rm_06", "expression": "trade_when(systematic_risk_last_30_days > systematic_risk_last_90_days, rank(-returns), -1)"},
+        {"template_id": "rm_05", "expression": "-rank(beta_last_60_days_spy) * rank(ebitda / (enterprise_value + 0.001))"},
+        {"template_id": "rm_06", "expression": "trade_when(systematic_risk_last_30_days > systematic_risk_last_60_days, rank(-returns), -1)"},
     ],
 
     # INTRADAY PATTERNS — open/high/low/close relationships, 0 submitted
@@ -408,7 +408,7 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
 
     # DEEP ANALYST SENTIMENT — snt1_d1_* deep fields, mostly untapped
     "analyst_deep": [
-        {"template_id": "as_01", "expression": "-rank(snt1_d1_earningstorpedo)"},
+        {"template_id": "as_01", "expression": "-rank(snt1_d1_earningsrevision)"},
         {"template_id": "as_02", "expression": "rank(snt1_d1_buyrecpercent - snt1_d1_sellrecpercent)"},
         {"template_id": "as_03", "expression": "rank(snt1_d1_uptargetpercent - snt1_d1_downtargetpercent)"},
         {"template_id": "as_04", "expression": "rank(snt1_d1_analystcoverage) * rank(snt1_d1_earningsrevision)"},
@@ -431,8 +431,8 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "wild_01", "expression": "rank(ts_mean(rel_ret_cust, 5)) * rank(ts_backfill(implied_volatility_call_60, 60) / (historical_volatility_60 + 0.001))"},
         {"template_id": "wild_02", "expression": "group_zscore(ts_backfill(rp_css_credit, 60), industry) * rank(ts_rank(cashflow_op / cap, 252))"},
         {"template_id": "wild_03", "expression": "trade_when(historical_volatility_20 > ts_mean(historical_volatility_20, 60), rank(-returns) * rank(volume / adv20), -1)"},
-        {"template_id": "wild_04", "expression": "rank(ts_backfill(forward_price_60, 60) / close - 1) * rank(gross_profit_to_assets_ratio)"},
-        {"template_id": "wild_05", "expression": "rank(-snt1_d1_earningstorpedo) * rank(ts_mean(rel_ret_comp, 5))"},
+        {"template_id": "wild_04", "expression": "rank(ts_backfill(forward_price_60, 60) / close - 1) * rank((revenue - cogs) / (assets + 0.001))"},
+        {"template_id": "wild_05", "expression": "rank(-snt1_d1_earningsrevision) * rank(ts_mean(rel_ret_comp, 5))"},
         {"template_id": "wild_06", "expression": "rank(ts_backfill(fscore_bfl_surface_accel, 60)) * rank(ts_backfill(implied_volatility_mean_skew_60, 60))"},
         {"template_id": "wild_07", "expression": "rank(correlation_last_30_days_spy - correlation_last_360_days_spy) * rank(ts_rank(operating_income / cap, 252))"},
     ],
@@ -444,13 +444,13 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         # Momentum with reversion dodge — delay 10 days to skip short-term reversion
         {"template_id": "tut_02", "expression": "ts_delay(ts_delta(close, 250) / ts_delay(close, 250), 10)"},
         # Count positive return days — completely different signal structure
-        {"template_id": "tut_03", "expression": "rank(ts_sum(returns > 0? 1:0, 252))"},
+        {"template_id": "tut_03", "expression": "rank(ts_sum(if_else(returns > 0, 1, 0), 252))"},
         # Positive days + volume condition via trade_when
-        {"template_id": "tut_04", "expression": "trade_when(volume > adv20, ts_sum(returns > 0? 1:0, 250), -1)"},
+        {"template_id": "tut_04", "expression": "trade_when(volume > adv20, ts_sum(if_else(returns > 0, 1, 0), 250), -1)"},
         # Buzz vs volume regression — tutorial says "most effective method"
         {"template_id": "tut_05", "expression": "ts_regression(-scl12_buzz, volume, 250)"},
         # News conditional momentum/reversion — tutorial answer expression
-        {"template_id": "tut_06", "expression": "rank(ts_sum(vec_avg(nws12_afterhsz_sl), 60)) > 0.5? 1 : rank(-ts_delta(close, 2))"},
+        {"template_id": "tut_06", "expression": "if_else(rank(ts_sum(vec_avg(nws12_afterhsz_sl), 60)) > 0.5, 1, rank(-ts_delta(close, 2)))"},
         # Custom cap-group neutralized IV spread — tutorial advanced pattern
         {"template_id": "tut_07", "expression": "group_neutralize(ts_backfill(implied_volatility_call_120, 60) - ts_backfill(implied_volatility_put_120, 60), bucket(rank(cap), range=\"0.1,1,0.1\"))"},
         # EV/EBITDA value — tutorial basic pattern
@@ -476,8 +476,8 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "hs_09", "expression": "rank(ebitda / enterprise_value)"},
         {"template_id": "hs_10", "expression": "-ts_zscore(close / (bookvalue_ps + 0.001), 63)"},
         # Gross profit to assets — Novy-Marx factor, use model77 pre-computed ratio
-        {"template_id": "hs_11", "expression": "rank(gross_profit_to_assets_ratio)"},
-        {"template_id": "hs_12", "expression": "ts_rank(gross_profit_to_assets_ratio, 252)"},
+        {"template_id": "hs_11", "expression": "rank((revenue - cogs) / (assets + 0.001))"},
+        {"template_id": "hs_12", "expression": "ts_rank((revenue - cogs) / (assets + 0.001), 252)"},
         # FCF yield — free cash flow / market cap
         {"template_id": "hs_13", "expression": "rank(cashflow_op / cap)"},
         {"template_id": "hs_14", "expression": "-ts_zscore(cap / (cashflow_op + 0.001), 63)"},
@@ -531,8 +531,8 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "sr_12", "expression": "rank(operating_income / assets)"},
         {"template_id": "sr_13", "expression": "rank(ebitda / assets)"},
         {"template_id": "sr_14", "expression": "rank(sales / liabilities)"},
-        {"template_id": "sr_15", "expression": "rank(net_income / assets)"},
-        {"template_id": "sr_16", "expression": "rank(current_assets / current_liabilities)"},
+        {"template_id": "sr_15", "expression": "rank(income / assets)"},
+        {"template_id": "sr_16", "expression": "rank(assets_curr / liabilities_curr)"},
         {"template_id": "sr_17", "expression": "rank(retained_earnings / assets)"},
         {"template_id": "sr_18", "expression": "rank(working_capital / assets)"},
         # Inverted ratios (what's cheap relative to fundamentals)
@@ -659,6 +659,131 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "ivt_05", "expression": "rank(ts_zscore(ts_backfill(implied_volatility_call_60, 60) - historical_volatility_60, {n}))"},
         {"template_id": "ivt_06", "expression": "rank(ts_backfill(implied_volatility_call_60, 60) / (historical_volatility_60 + 0.001)) * rank(-returns)"},
     ],
+
+    # ══════════════════════════════════════════════════════════════════
+    # v7.2: RESEARCH-BACKED NOVEL TEMPLATES — break the self-corr wall
+    # 73 submissions use 36 fields + 6 operator patterns.
+    # These use 5,868 untouched fields + 10 unused operators.
+    # ══════════════════════════════════════════════════════════════════
+
+    # ── Correlation pipelines (NEW: ts_corr operator) ──
+    "corr_pipeline": [
+        {"template_id": "cp_01", "expression": "-ts_rank(ts_decay_linear(ts_corr(rank({fresh_est_field}), rank(returns), 60), 10), 20)"},
+        {"template_id": "cp_02", "expression": "-ts_rank(ts_decay_linear(ts_corr(group_rank({fresh_fund_field}, industry), ts_rank(volume, 20), 20), 8), 15)"},
+        {"template_id": "cp_03", "expression": "-ts_corr(rank({fresh_est_field}), rank({fresh_fund_field}), 120)"},
+        {"template_id": "cp_04", "expression": "-ts_rank(ts_decay_linear(ts_decay_linear(ts_corr(close, volume, 10), 16), 4), 5)"},
+        {"template_id": "cp_05", "expression": "-ts_corr(rank(ts_backfill({fn_field}, 60)), rank(returns), 120)"},
+    ],
+
+    # ── Regression residuals (NEW: ts_regression operator) ──
+    "regression_alpha": [
+        {"template_id": "ra_01", "expression": "trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.55, -ts_regression(returns, ts_delay(returns, 1), 120, lag=0, rettype=2), -1)"},
+        {"template_id": "ra_02", "expression": "-rank(ts_regression({fresh_est_field}, ts_delay({fresh_est_field}, 20), 120, lag=0, rettype=2))"},
+        {"template_id": "ra_03", "expression": "-rank(ts_regression(returns, ts_delay(rank({fresh_fund_field} / cap), 1), 60, lag=0, rettype=2))"},
+        {"template_id": "ra_04", "expression": "rank(ts_regression({fresh_fund_field} / cap, ts_step(1), 252, 0, 1))"},
+    ],
+
+    # ── Accruals & earnings quality (academic anomalies) ──
+    "earnings_quality": [
+        {"template_id": "eq_01", "expression": "-group_zscore(rank((income - cashflow_op) / (assets + 0.001)), industry)"},
+        {"template_id": "eq_02", "expression": "-ts_corr(cashflow_op / cap, income / cap, 252)"},
+        {"template_id": "eq_03", "expression": "-group_rank(ts_delta(ts_backfill(capex / (sales + 0.001), 90), 90), industry)"},
+        {"template_id": "eq_04", "expression": "-group_zscore(ts_delta(ts_delta(retained_earnings, 120), 120), sector)"},
+        {"template_id": "eq_05", "expression": "group_rank(ts_backfill(rd_expense / (sales + 0.001), 90), industry)"},
+    ],
+
+    # ── fn_financial quarterly (317 untouched fields) ──
+    "fn_quarterly": [
+        {"template_id": "fnq_01", "expression": "ts_rank(ts_backfill({fn_field}, 60) / cap, 252)"},
+        {"template_id": "fnq_02", "expression": "group_rank(ts_backfill({fn_field}, 60) / cap, industry)"},
+        {"template_id": "fnq_03", "expression": "rank(ts_delta(ts_backfill({fn_field}, 60), 60) / (ts_backfill({fn_field}, 60) + 0.001))"},
+        {"template_id": "fnq_04", "expression": "-ts_corr(ts_backfill({fn_field}, 60) / cap, returns, 120)"},
+        {"template_id": "fnq_05", "expression": "rank(ts_backfill({fn_field}, 60) / cap) * rank(-ts_av_diff(returns, 20))"},
+        {"template_id": "fnq_06", "expression": "ts_decay_linear(group_rank(ts_backfill({fn_field}, 60) / cap, subindustry), {n})"},
+        {"template_id": "fnq_07", "expression": "trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.5, rank(ts_backfill({fn_field}, 60) / cap), -1)"},
+        {"template_id": "fnq_08", "expression": "signed_power(group_rank(ts_backfill({fn_field}, 60) / cap, industry), 0.5)"},
+    ],
+
+    # ── Derivative scores (24 fields, 100% untouched) ──
+    "deriv_score": [
+        {"template_id": "ds_01", "expression": "rank({deriv_field})"},
+        {"template_id": "ds_02", "expression": "group_rank({deriv_field}, industry)"},
+        {"template_id": "ds_03", "expression": "ts_decay_linear(rank({deriv_field}), {n})"},
+        {"template_id": "ds_04", "expression": "rank({deriv_field}) * rank(-ts_av_diff(returns, 10))"},
+        {"template_id": "ds_05", "expression": "trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.5, rank({deriv_field}), -1)"},
+        {"template_id": "ds_06", "expression": "signed_power(rank({deriv_field}), 0.5) * signed_power(rank(-returns), 0.5)"},
+        {"template_id": "ds_07", "expression": "ts_rank(ts_delta({deriv_field}, 20), 120)"},
+        {"template_id": "ds_08", "expression": "-ts_corr(rank({deriv_field}), rank(returns), 60)"},
+    ],
+
+    # ── Risk beta (16 fields, 100% untouched) ──
+    "beta_signal": [
+        {"template_id": "bs_01", "expression": "-group_zscore({beta_field}, sector)"},
+        {"template_id": "bs_02", "expression": "-rank({beta_field}) * rank((revenue - cogs) / (assets + 0.001))"},
+        {"template_id": "bs_03", "expression": "trade_when({beta_field} < ts_mean({beta_field}, 60), rank(-returns), -1)"},
+        {"template_id": "bs_04", "expression": "ts_delta(-rank({beta_field}), 20)"},
+        {"template_id": "bs_05", "expression": "-ts_corr({beta_field}, returns, 120)"},
+    ],
+
+    # ── Nonlinear / signed_power (NEW operator) ──
+    "nonlinear_power": [
+        {"template_id": "nl_01", "expression": "signed_power(group_rank({fresh_fund_field} / cap, industry), 0.5) * signed_power(rank(-returns), 0.5)"},
+        {"template_id": "nl_02", "expression": "signed_power(rank(ts_backfill({fn_field}, 60) / cap), 0.7) * signed_power(rank({deriv_field}), 0.3)"},
+        {"template_id": "nl_03", "expression": "signed_power(ts_rank({fresh_fund_field} / cap, 252), 2.0)"},
+    ],
+
+    # ── Ternary regime switching (structural novelty) ──
+    "regime_ternary": [
+        {"template_id": "rt_01", "expression": "if_else(ts_mean(close, 2) < ts_mean(close, 8) - ts_std_dev(close, 8), 1, if_else(ts_mean(close, 2) > ts_mean(close, 8) + ts_std_dev(close, 8), -1, rank(-ts_delta(close, 1))))"},
+        {"template_id": "rt_02", "expression": "if_else(group_rank({fresh_fund_field} / cap, industry) > 0.6, rank(-ts_delta(close, 3)), 0)"},
+        {"template_id": "rt_03", "expression": "if_else(ts_delta({fresh_est_field}, 20) > 0, rank({fresh_est_field} / close), rank(-returns))"},
+    ],
+
+    # ── Max/min pipeline selectors (adaptive architecture) ──
+    "pipeline_select": [
+        {"template_id": "ps_01", "expression": "max(ts_rank(ts_decay_linear(ts_corr(close, volume, 15), 5), 12), ts_rank(rank({fresh_fund_field} / cap), 60)) * -1"},
+        {"template_id": "ps_02", "expression": "max(rank({deriv_field}), rank(ts_backfill({fn_field}, 60) / cap))"},
+    ],
+
+    # ── Fresh fundamentals (proven patterns, fresh fields) ──
+    "fresh_fundamental": [
+        {"template_id": "ff_01", "expression": "ts_rank({fresh_fund_field} / cap, 252)"},
+        {"template_id": "ff_02", "expression": "group_rank(ts_rank({fresh_fund_field} / cap, 252), industry)"},
+        {"template_id": "ff_03", "expression": "rank(ts_zscore({fresh_fund_field} / cap, {n}))"},
+        {"template_id": "ff_04", "expression": "rank({fresh_fund_field} / cap) * rank(-returns)"},
+        {"template_id": "ff_05", "expression": "rank(ts_delta({fresh_fund_field}, {n}) / ({fresh_fund_field} + 0.001))"},
+        {"template_id": "ff_06", "expression": "-rank(ts_zscore({fresh_fund_field}, {n})) + -rank(ts_mean((close - vwap) / vwap, {m}))"},
+        {"template_id": "ff_07", "expression": "rank({fresh_fund_field} / cap) + rank(trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.5, rank(-returns), -1))"},
+        {"template_id": "ff_08", "expression": "group_rank({fresh_fund_field} / cap, subindustry) * rank(-ts_mean(returns, {n}))"},
+        {"template_id": "ff_09", "expression": "ts_decay_linear(rank({fresh_fund_field} / cap), {n})"},
+        {"template_id": "ff_10", "expression": "rank(ts_rank({fresh_fund_field} / cap, 60)) * rank(ts_rank({fresh_fund_field} / cap, 252))"},
+    ],
+
+    # ── Fresh analyst estimates ──
+    "fresh_estimates": [
+        {"template_id": "fe_01", "expression": "group_rank(ts_rank({fresh_est_field} / close, 60), industry)"},
+        {"template_id": "fe_02", "expression": "rank(ts_zscore({fresh_est_field} / cap, {n}))"},
+        {"template_id": "fe_03", "expression": "rank(ts_delta({fresh_est_field}, 60) / ({fresh_est_field} + 0.001))"},
+        {"template_id": "fe_04", "expression": "rank({fresh_est_field} / cap) * rank(-returns)"},
+        {"template_id": "fe_05", "expression": "ts_decay_linear(rank(group_rank({fresh_est_field} / close, industry)), {n})"},
+        {"template_id": "fe_06", "expression": "rank(ts_rank({fresh_est_field} / cap, 252)) + rank(-ts_mean(returns, {m}))"},
+        {"template_id": "fe_07", "expression": "rank({fresh_est_field} / close) * rank(trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.5, rank(-returns), -1))"},
+        {"template_id": "fe_08", "expression": "group_rank(ts_zscore({fresh_est_field} / close, {n}), subindustry)"},
+    ],
+
+    # ── Model77 novel patterns (EWAN ONLY — 3,238 untouched anomaly fields) ──
+    "model77_novel": [
+        {"template_id": "m7n_01", "expression": "group_zscore({model77_field}, sector)"},
+        {"template_id": "m7n_02", "expression": "-ts_delta({model77_field}, 60)"},
+        {"template_id": "m7n_03", "expression": "rank(ts_arg_max({model77_field}, 252)) * signed_power({model77_field}, 0.5)"},
+        {"template_id": "m7n_04", "expression": "trade_when(ts_arg_min({model77_field}, 120) < 20, ts_av_diff({model77_field}, 60), -1)"},
+        {"template_id": "m7n_05", "expression": "ts_quantile({model77_field}, 252)"},
+        {"template_id": "m7n_06", "expression": "-ts_corr(rank({model77_field}), rank(returns), 120)"},
+        {"template_id": "m7n_07", "expression": "signed_power({model77_field}, 0.5) * signed_power(rank(-returns), 0.5)"},
+        {"template_id": "m7n_08", "expression": "trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.5, rank({model77_field}), -1)"},
+        {"template_id": "m7n_09", "expression": "group_rank({model77_field}, industry) * rank(-ts_av_diff(returns, 10))"},
+        {"template_id": "m7n_10", "expression": "-ts_regression({model77_field}, ts_delay({model77_field}, 20), 120, lag=0, rettype=2)"},
+    ],
 }
 
 # ── v7.0: Dynamic field loading from datasets.py ──────────────────
@@ -669,6 +794,7 @@ from datasets import (
     get_sentiment_fields, get_fscore_fields, get_derivative_fields,
     get_options_windows, get_pcr_windows, get_model77_fields,
     get_news_event_fields, get_rp_underused_fields,
+    get_fresh_fundamental_fields, get_fresh_fn_fields, get_fresh_estimate_fields,
 )
 
 FUNDAMENTAL_FIELDS = get_fundamental_fields()
@@ -680,23 +806,44 @@ DERIVATIVE_FIELDS = get_derivative_fields()
 OPTIONS_WINDOWS = get_options_windows()
 PCR_WINDOWS = get_pcr_windows()
 
+# v7.1: Fresh field pools — fields NOT in any existing submission
+FRESH_FUND_FIELDS = get_fresh_fundamental_fields() or [
+    "retained_earnings", "ebitda", "(revenue - cogs)", "income",
+    "total_debt", "free_cash_flow", "rd_expense", "capex",
+    "working_capital", "equity", "equity",
+    "dividend / (close + 0.001)", "interest_expense", "depreciation",
+]
+FRESH_FN_FIELDS = get_fresh_fn_fields() or [
+    "fn_oper_income_q", "sales", "ebitda", "income",
+    "cash", "debt", "revenue",
+    "cashflow", "cashflow_op", "capex",
+]
+FRESH_EST_FIELDS = get_fresh_estimate_fields() or [
+    "est_ptp", "est_sales", "est_ebitda", "est_eps",
+    "est_eps", "bookvalue_ps", "est_eps",
+]
+RISK_BETA_FIELDS = [
+    "beta_last_30_days_spy", "beta_last_60_days_spy", "beta_last_90_days_spy",
+    "beta_last_60_days_spy", "beta_last_360_days_spy", "beta_last_360_days_spy",
+]
+
 # v7.1: Untouched field pools for new signal dimensions
 NEWS_EVENT_FIELDS = get_news_event_fields() or [
-    "nws18_acb", "nws18_bam", "nws18_bee", "nws18_ber",
-    "nws18_event_relevance", "nws18_event_similarity_days",
-    "nws18_ghc_lna", "nws18_nip", "nws18_qcm", "nws18_qep",
-    "nws18_qmb", "nws18_relevance", "nws18_ssc", "nws18_sse",
+    "ts_backfill(nws18_acb, 60)", "ts_backfill(nws18_bam, 60)", "ts_backfill(nws18_bee, 60)", "ts_backfill(nws18_ber, 60)",
+    "ts_backfill(nws18_event_relevance, 60)", "ts_backfill(nws18_event_similarity_days, 60)",
+    "ts_backfill(nws18_ghc_lna, 60)", "ts_backfill(nws18_nip, 60)", "ts_backfill(nws18_qcm, 60)", "ts_backfill(nws18_qep, 60)",
+    "ts_backfill(nws18_qmb, 60)", "ts_backfill(nws18_relevance, 60)", "ts_backfill(nws18_ssc, 60)", "ts_backfill(nws18_sse, 60)",
 ]
 RP_UNDERUSED_FIELDS = get_rp_underused_fields() or [
-    "rp_css_assets", "rp_css_business", "rp_css_dividends", "rp_css_equity",
-    "rp_css_insider", "rp_css_labor", "rp_css_mna", "rp_css_product",
-    "rp_css_revenue", "rp_css_technical",
-    "rp_ess_assets", "rp_ess_business", "rp_ess_credit", "rp_ess_dividends",
-    "rp_ess_equity", "rp_ess_insider", "rp_ess_labor", "rp_ess_product",
-    "rp_ess_revenue", "rp_ess_technical",
-    "rp_nip_assets", "rp_nip_business", "rp_nip_credit", "rp_nip_dividends",
-    "rp_nip_equity", "rp_nip_insider", "rp_nip_labor", "rp_nip_product",
-    "rp_nip_revenue", "rp_nip_technical",
+    "ts_backfill(rp_css_assets, 60)", "ts_backfill(rp_css_business, 60)", "ts_backfill(rp_css_dividends, 60)", "ts_backfill(rp_css_equity, 60)",
+    "ts_backfill(rp_css_insider, 60)", "ts_backfill(rp_css_labor, 60)", "ts_backfill(rp_css_mna, 60)", "ts_backfill(rp_css_product, 60)",
+    "ts_backfill(rp_css_revenue, 60)", "ts_backfill(rp_css_technical, 60)",
+    "ts_backfill(rp_ess_assets, 60)", "ts_backfill(rp_ess_business, 60)", "ts_backfill(rp_ess_credit, 60)", "ts_backfill(rp_ess_dividends, 60)",
+    "ts_backfill(rp_ess_equity, 60)", "ts_backfill(rp_ess_insider, 60)", "ts_backfill(rp_ess_labor, 60)", "ts_backfill(rp_ess_product, 60)",
+    "ts_backfill(rp_ess_revenue, 60)", "ts_backfill(rp_ess_technical, 60)",
+    "ts_backfill(rp_nip_assets, 60)", "ts_backfill(rp_nip_business, 60)", "ts_backfill(rp_nip_credit, 60)", "ts_backfill(rp_nip_dividends, 60)",
+    "ts_backfill(rp_nip_equity, 60)", "ts_backfill(rp_nip_insider, 60)", "ts_backfill(rp_nip_labor, 60)", "ts_backfill(rp_nip_product, 60)",
+    "ts_backfill(rp_nip_revenue, 60)", "ts_backfill(rp_nip_technical, 60)",
 ]
 
 # Model77 fields — curated tiers for template sampling
@@ -712,15 +859,15 @@ MODEL77_TIER1_FIELDS = [
     "change_in_eps_surprise", "net_fy1_analyst_revisions",
     "three_month_fy1_eps_revision", "six_month_avg_fy1_eps_revision",
     "forward_median_earnings_yield", "normalized_earnings_yield",
-    "forward_cash_flow_to_price", "forward_ebitda_to_enterprise_value_2",
+    "forward_cash_flow_to_price", "ebitda / (enterprise_value + 0.001)",
     "tobins_q_ratio", "financial_statement_value_score",
     "equity_value_score", "income_statement_value_score",
-    "gross_profit_to_assets_ratio", "gross_profit_margin_ttm_2",
-    "cash_flow_return_on_invested_capital", "cash_earnings_return_on_equity",
-    "return_on_invested_capital_4", "fcf_yield_times_forward_roe",
+    "(revenue - cogs) / (assets + 0.001)", "gross_profit_margin_ttm_2",
+    "cashflow_op / (assets + 0.001)", "cash_earnings_return_on_equity",
+    "return_on_invested_capital_4", "fcf_yield_multiplied_forward_roe",
     "asset_growth_rate", "one_year_change_total_assets",
     "sustainable_growth_rate", "reinvestment_rate",
-    "distress_risk_measure", "credit_risk_premium_indicator",
+    "debt / (equity + 0.001)", "credit_risk_premium_indicator",
     "twelve_month_short_interest_change",
     "value_momentum_analyst_score", "momentum_analyst_composite_score",
     "price_momentum_module_score", "fundamental_growth_module_score",
@@ -736,10 +883,10 @@ MODEL77_TIER2_FIELDS = [
     "standardized_unexpected_cash_flow", "standardized_unexpected_cashflow",
     "book_leverage_ratio_3", "interest_coverage_ratio_5",
     "yearly_change_leverage", "twelve_month_total_debt_change_2",
-    "five_year_eps_stability", "one_year_eps_growth_rate",
+    "ts_std_dev(eps, 252)", "one_year_eps_growth_rate",
     "forward_two_year_eps_growth", "one_year_ahead_eps_growth",
     "one_quarter_ahead_eps_growth", "long_term_growth_estimate",
-    "capex_to_total_assets", "capex_to_depreciation_linkage",
+    "capex_to_total_assets", "capex / (depre_amort + 0.001)",
     "ttm_operating_cash_flow_to_price", "ttm_operating_income_to_ev",
     "ttm_sales_to_enterprise_value",
     "implied_minus_realized_volatility_2", "implied_option_volatility",
@@ -762,7 +909,7 @@ MODEL77_ALL_FIELDS = MODEL77_TIER1_FIELDS + MODEL77_TIER2_FIELDS + MODEL77_TIER3
 MODEL77_NEGATIVE_DIRECTION = {
     "asset_growth_rate", "one_year_change_total_assets",
     "trailing_twelve_month_accruals", "twelve_month_total_debt_change_2",
-    "yearly_change_leverage", "distress_risk_measure",
+    "yearly_change_leverage", "debt / (equity + 0.001)",
     "credit_risk_premium_indicator", "twelve_month_short_interest_change",
     "cash_burn_rate", "book_leverage_ratio_3",
     "implied_minus_realized_volatility_2",
@@ -834,4 +981,32 @@ DATASET_NEUTRALIZATION = {
     # v7.1.1: Academic factor zoo + IV term structure
     "accruals_quality": ["INDUSTRY", "SUBINDUSTRY", "MARKET"],
     "iv_term_structure": ["MARKET", "SECTOR", "INDUSTRY"],
+    # v7.2: Research-backed novel families
+    "corr_pipeline": ["MARKET", "INDUSTRY", "SUBINDUSTRY"],
+    "regression_alpha": ["MARKET", "SECTOR", "NONE"],
+    "earnings_quality": ["INDUSTRY", "SUBINDUSTRY", "MARKET"],
+    "fn_quarterly": ["INDUSTRY", "SUBINDUSTRY", "MARKET"],
+    "deriv_score": ["INDUSTRY", "MARKET", "SECTOR", "SUBINDUSTRY"],
+    "beta_signal": ["MARKET", "SECTOR", "NONE"],
+    "nonlinear_power": ["INDUSTRY", "MARKET", "SUBINDUSTRY"],
+    "regime_ternary": ["MARKET", "SECTOR", "NONE"],
+    "pipeline_select": ["MARKET", "INDUSTRY", "SUBINDUSTRY"],
+    "fresh_fundamental": ["INDUSTRY", "SUBINDUSTRY", "MARKET"],
+    "fresh_estimates": ["INDUSTRY", "SUBINDUSTRY", "MARKET"],
+    "model77_novel": ["INDUSTRY", "SUBINDUSTRY", "MARKET", "SECTOR"],
 }
+
+# ══════════════════════════════════════════════════════════════
+# v7.2: Merge research-backed mega template library (880 templates)
+# ══════════════════════════════════════════════════════════════
+try:
+    from research_templates import (
+        RESEARCH_TEMPLATES, RESEARCH_NEUTRALIZATIONS, EWAN_ONLY_FAMILIES
+    )
+    TEMPLATE_LIBRARY.update(RESEARCH_TEMPLATES)
+    NEUTRALIZATION_OPTIONS = RESEARCH_NEUTRALIZATIONS  # Available for generator
+    DATASET_NEUTRALIZATION.update(RESEARCH_NEUTRALIZATIONS)
+    _n_research = sum(len(v) for v in RESEARCH_TEMPLATES.values())
+    print(f"[TEMPLATES] Merged {len(RESEARCH_TEMPLATES)} research families ({_n_research} templates)")
+except ImportError:
+    print("[TEMPLATES] research_templates.py not found — running without research library")

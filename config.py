@@ -58,7 +58,7 @@ MAX_TURNOVER = 0.70
 NEAR_PASSER_MIN_SHARPE = 1.35
 NEAR_PASSER_MIN_FITNESS = 0.75
 NEAR_PASSER_MAX_TURNOVER = 0.75
-REFINEMENT_PROBABILITY = 0.60  # v6.2.1: was 0.40 — queue growing faster than processing (178 unconsumed)
+REFINEMENT_PROBABILITY = 0.40  # v7.2: explore more fresh research templates, refine less
 
 MIN_REFINEMENT_SHARPE = 1.20
 FRONTIER_MIN_SHARPE = 1.25
@@ -67,26 +67,26 @@ FRONTIER_ALT_MIN_SHARPE = 1.45
 FRONTIER_ALT_MIN_FITNESS = 0.68
 
 # Frontier templates worth exploiting more aggressively
-STRONG_TEMPLATES = {"cs_02", "pvc_04", "vol_03", "cond_01", "va_02", "mr_02", "pvc_03", "fs_04", "fs_05", "fs_06", "opt_03", "opt_04"}
-ELITE_TEMPLATES = {"mr_04", "vol_03", "va_02", "cond_01"}
+STRONG_TEMPLATES = set()  # v7.2: old saturated templates no longer elite
+ELITE_TEMPLATES = set()  # v7.2: old saturated templates no longer elite
 
 # Diversity / anti-self-correlation
 DIVERSITY_LOOKBACK_RUNS = 120
-MAX_RECENT_TEMPLATE_COUNT = 20
+MAX_RECENT_TEMPLATE_COUNT = 10  # v7.2: faster rotation with 1167 templates
 RELAXED_TEMPLATE_COUNT = 14
 RELAXED_TEMPLATE_MIN_AVG_SHARPE = 1.30
 RELAXED_TEMPLATE_MIN_AVG_FITNESS = 0.70
-DIVERSITY_EXPLORATION_PROBABILITY = 0.12
-MAX_REFINEMENT_ATTEMPTS_PER_BASE = 5   # v6.0: was 10 — logs show 10+ attempts never crack fitness
+DIVERSITY_EXPLORATION_PROBABILITY = 0.08  # v7.2: epoch rotation handles diversity
+MAX_REFINEMENT_ATTEMPTS_PER_BASE = 6  # v7.2: explore more, refine less
 MAX_CORE_SIGNAL_EXHAUSTIONS = 2  # v6.0: was 3 — same core through different candidates wastes sims
-MAX_FAMILY_TEMPLATE_EXHAUSTIONS = 2  # v6.0: was 3 — m7c_03 exhausted 12 times in overnight run
+MAX_FAMILY_TEMPLATE_EXHAUSTIONS = 5  # v7.2: research families have 10-14 templates
 MAX_REFINEMENT_PER_CORE = 3  # v6.2.1: was 5 — faster exhaustion, queue was growing unbounded
-MAX_SUBMISSIONS_PER_CORE = 3  # v6.0.1: allow up to 3 variants of same core before blocking (WQ accepts different post-processing)
+MAX_SUBMISSIONS_PER_CORE = 3  # v7.2: self-corr wall means 4 variants all correlate
 LOCAL_REFINEMENT_HISTORY = 10
 LOCAL_REFINEMENT_MAX_SIMILARITY = 0.90
 
 # Template scoring / pruning
-TEMPLATE_SCORE_LOOKBACK_RUNS = 180
+TEMPLATE_SCORE_LOOKBACK_RUNS = 50  # v7.2: minimal egress, 50 recent runs is enough for Thompson
 MIN_TEMPLATE_OBS_FOR_PRUNE = 6
 
 HARD_PRUNE_MAX_AVG_SHARPE = 0.20
@@ -111,9 +111,9 @@ AUTO_SUBMIT = False
 # Set your schedule here or let it auto-assign based on alphabetical order.
 SUBMIT_SCHEDULE = {
     "ewansutherland@icloud.com": [5, 17],   # 5am and 5pm UTC
-    # "gmpc201@exeter.ac.uk": [6, 18],         # 6am and 6pm UTC
-    # "tns203@exeter.ac.uk": [7, 19],           # 7am and 7pm UTC
-    # "lucacroci2005@gmail.com": [8, 20],       # 8am and 8pm UTC
+    "gmpc201@exeter.ac.uk": [6, 18],         # 6am and 6pm UTC
+    "tns203@exeter.ac.uk": [7, 19],           # 7am and 7pm UTC
+    "lucacroci2005@gmail.com": [8, 20],       # 8am and 8pm UTC
 }
 # Minimum score change to auto-submit (avoids marginal alphas flipping negative)
 SUBMIT_MIN_SCORE = 3
@@ -450,14 +450,14 @@ PREFER_TS_MEAN_WINDOW = [3, 5, 10]
 
 # v5.6: LLM generation
 # v6.2.1: Bumped to 0.30 — LLM now has portfolio-additive focus prompt
-LLM_GENERATION_PROBABILITY = 0.30
+LLM_GENERATION_PROBABILITY = 0.10  # v7.2: Reduced from 0.30 — research templates are primary now
 
 # v6.2.1: Signal combination — DOUBLED from 0.10 — combos with additive bias are the
 # most likely path to positive score changes
-COMBO_GENERATION_PROBABILITY = 0.20
+COMBO_GENERATION_PROBABILITY = 0.10  # v7.2: Reduced from 0.20 — templates now primary
 
 # v6.1: Evolutionary mutation — LLM mutates top performers
-EVOLVE_GENERATION_PROBABILITY = 0.10
+EVOLVE_GENERATION_PROBABILITY = 0.05  # v7.2: Reduced from 0.10 — templates now primary
 
 # ── v5.7: Signal-class settings profiles ─────────────────────────────
 # Each signal class has preferred settings based on WQ researcher recommendations.
@@ -519,3 +519,15 @@ MIN_EXPLORATION_PER_FAMILY = 25
 # v5.9: LLM rate limit cooldown (seconds between calls)
 LLM_COOLDOWN_SECONDS = 30  # v6.2.1: Reduced from 120s — key rotation handles per-key rate limits (60s each)
 LLM_AST_RETRY_MAX = 1      # v6.1: retry failed expressions once with error feedback
+
+# ═══════════════════════════════════════════════════════════════
+# v7.2: Teammate score checking
+# After your own submission pipeline runs, also check scores for
+# teammates' ready alphas so you can manually submit on their behalf.
+# Toggle off once they can check scores independently.
+# ═══════════════════════════════════════════════════════════════
+CHECK_TEAMMATE_SCORES = True
+TEAMMATE_OWNERS = [
+    "tns203@exeter.ac.uk",
+    "lucacroci2005@gmail.com",
+]

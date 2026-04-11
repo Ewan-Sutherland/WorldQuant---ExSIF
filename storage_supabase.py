@@ -323,18 +323,165 @@ class Storage:
 
     # ── Complex Queries (via RPC) ─────────────────────────────────────
 
-    def get_recent_family_stats(self, limit: int = 500) -> list[dict]:
+    def get_recent_family_stats(self, limit: int = 50) -> list[dict]:
+        """v7.2: Direct query + local aggregation to avoid RPC timeout on free Supabase."""
+        # Try RPC first (fastest if it works)
         try:
-            return self._rpc("get_family_stats", {"run_limit": limit, "owner_filter": self.owner})
+            result = self._rpc("get_family_stats", {"run_limit": limit, "owner_filter": self.owner})
+            if result:
+                print(f"[STATS] RPC get_family_stats OK ({len(result)} families, owner-filtered)")
+                return result
         except Exception:
-            # Fallback for pre-migration Supabase (RPC doesn't accept owner_filter yet)
-            return self._rpc("get_family_stats", {"run_limit": limit})
+            pass
+        try:
+            result = self._rpc("get_family_stats", {"run_limit": limit})
+            if result:
+                print(f"[STATS] RPC get_family_stats OK ({len(result)} families, unfiltered)")
+                return result
+        except Exception:
+            pass
+        # Fallback: query 3 tables separately and join in Python
+        # (runs table doesn't have family/sharpe — those are in candidates/metrics)
+        try:
+            # Get recent candidates with family info
+            candidates = self._get("candidates", {
+                "select": "candidate_id,family,template_id",
+                "order": "created_at.desc",
+                "limit": str(limit),
+            })
+            if not candidates:
+                print("[STATS_FALLBACK] No candidates found")
+                return []
+            print(f"[STATS_FALLBACK] Got {len(candidates)} candidates")
+            cand_ids = [c["candidate_id"] for c in candidates]
+            cand_map = {c["candidate_id"]: c for c in candidates}
 
-    def get_recent_template_stats(self, limit: int = 180) -> list[dict]:
+            # Get runs for those candidates
+            runs = self._get("runs", {
+                "select": "run_id,candidate_id",
+                "candidate_id": f"in.({','.join(cand_ids[:200])})",
+                "status": "eq.completed",
+                "limit": str(limit),
+            })
+            if not runs:
+                return []
+            run_ids = [r["run_id"] for r in runs]
+            run_to_cand = {r["run_id"]: r["candidate_id"] for r in runs}
+
+            # Get metrics for those runs
+            metrics = self._get("metrics", {
+                "select": "run_id,sharpe,fitness,turnover",
+                "run_id": f"in.({','.join(run_ids[:200])})",
+                "limit": str(limit),
+            })
+            if not metrics:
+                return []
+
+            # Join: metrics → runs → candidates → family
+            from collections import defaultdict
+            fam_data = defaultdict(list)
+            for m in metrics:
+                rid = m.get("run_id")
+                cid = run_to_cand.get(rid)
+                if cid and cid in cand_map:
+                    fam = cand_map[cid].get("family", "unknown")
+                    fam_data[fam].append(m)
+
+            results = []
+            for fam, mets in fam_data.items():
+                n = len(mets)
+                sharpes = [float(m.get("sharpe") or 0) for m in mets]
+                fitnesses = [float(m.get("fitness") or 0) for m in mets]
+                turnovers = [float(m.get("turnover") or 0) for m in mets]
+                results.append({
+                    "family": fam,
+                    "n_runs": n,
+                    "avg_sharpe": sum(sharpes) / n if n else 0,
+                    "avg_fitness": sum(fitnesses) / n if n else 0,
+                    "avg_turnover": sum(turnovers) / n if n else 0,
+                })
+            if results:
+                print(f"[STATS_FALLBACK] Aggregated {len(results)} families from {len(metrics)} runs (RPC unavailable)")
+            return results
+        except Exception as e:
+            print(f"[STATS_FALLBACK_ERROR] family stats fallback failed: {e}")
+            return []
+
+    def get_recent_template_stats(self, limit: int = 50) -> list[dict]:
+        """v7.2: Direct query + local aggregation to avoid RPC timeout."""
         try:
-            return self._rpc("get_template_stats", {"run_limit": limit, "owner_filter": self.owner})
+            result = self._rpc("get_template_stats", {"run_limit": limit, "owner_filter": self.owner})
+            if result:
+                return result
         except Exception:
-            return self._rpc("get_template_stats", {"run_limit": limit})
+            pass
+        try:
+            result = self._rpc("get_template_stats", {"run_limit": limit})
+            if result:
+                return result
+        except Exception:
+            pass
+        # Fallback: query 3 tables and join in Python
+        try:
+            candidates = self._get("candidates", {
+                "select": "candidate_id,family,template_id",
+                "order": "created_at.desc",
+                "limit": str(limit),
+            })
+            if not candidates:
+                return []
+            cand_ids = [c["candidate_id"] for c in candidates]
+            cand_map = {c["candidate_id"]: c for c in candidates}
+
+            runs = self._get("runs", {
+                "select": "run_id,candidate_id",
+                "candidate_id": f"in.({','.join(cand_ids[:200])})",
+                "status": "eq.completed",
+                "limit": str(limit),
+            })
+            if not runs:
+                return []
+            run_ids = [r["run_id"] for r in runs]
+            run_to_cand = {r["run_id"]: r["candidate_id"] for r in runs}
+
+            metrics = self._get("metrics", {
+                "select": "run_id,sharpe,fitness,turnover",
+                "run_id": f"in.({','.join(run_ids[:200])})",
+                "limit": str(limit),
+            })
+            if not metrics:
+                return []
+
+            from collections import defaultdict
+            tmpl_data = defaultdict(list)
+            for m in metrics:
+                rid = m.get("run_id")
+                cid = run_to_cand.get(rid)
+                if cid and cid in cand_map:
+                    tid = cand_map[cid].get("template_id", "unknown")
+                    fam = cand_map[cid].get("family", "unknown")
+                    tmpl_data[(tid, fam)].append(m)
+
+            results = []
+            for (tid, fam), mets in tmpl_data.items():
+                n = len(mets)
+                sharpes = [float(m.get("sharpe") or 0) for m in mets]
+                fitnesses = [float(m.get("fitness") or 0) for m in mets]
+                turnovers = [float(m.get("turnover") or 0) for m in mets]
+                results.append({
+                    "template_id": tid,
+                    "family": fam,
+                    "n_runs": n,
+                    "avg_sharpe": sum(sharpes) / n if n else 0,
+                    "avg_fitness": sum(fitnesses) / n if n else 0,
+                    "avg_turnover": sum(turnovers) / n if n else 0,
+                })
+            if results:
+                print(f"[STATS_FALLBACK] Aggregated {len(results)} templates from {len(metrics)} runs (RPC unavailable)")
+            return results
+        except Exception as e:
+            print(f"[STATS_FALLBACK_ERROR] template stats fallback failed: {e}")
+            return []
 
     def get_recent_settings_stats(self, limit: int = 500) -> dict[str, list[dict]]:
         """v5.5: Return performance stats grouped by each settings dimension."""

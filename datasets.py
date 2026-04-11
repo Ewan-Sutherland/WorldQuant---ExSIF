@@ -383,6 +383,43 @@ def get_rp_underused_fields() -> list[str]:
     return [f for f in all_rp if f not in common]
 
 
+# v7.1: SATURATED fields — appear in existing submissions, cause self-corr fails
+_SATURATED_FIELDS = {
+    'assets', 'cash_burn_rate', 'cashflow', 'cashflow_op', 'cogs', 'debt',
+    'earnings_momentum_composite_score', 'enterprise_value', 'equity', 'est_eps',
+    'est_fcf', 'fn_liab_fair_val_l1_a', 'historical_volatility_20', 'historical_volatility_60',
+    'implied_volatility_call_120', 'implied_volatility_call_270', 'implied_volatility_call_30',
+    'implied_volatility_call_60', 'implied_volatility_put_120', 'implied_volatility_put_270',
+    'implied_volatility_put_30', 'liabilities', 'news_max_up_ret', 'news_pct_1min',
+    'nws12_afterhsz_sl', 'one_year_change_total_assets', 'operating_income',
+    'parkinson_volatility_120', 'pcr_oi_270', 'rel_ret_comp', 'rp_ess_mna',
+    'rp_ess_revenue', 'sales', 'scl12_alltype_buzzvec', 'snt1_d1_earningssurprise',
+    'snt1_d1_netearningsrevision',
+}
+
+
+def get_fresh_fundamental_fields() -> list[str]:
+    """Fundamental fields NOT in any existing submission — guaranteed decorrelated."""
+    names = get_all_field_names()
+    fund = names.get("fundamental", [])
+    return [f for f in fund if f.lower() not in _SATURATED_FIELDS and len(f) > 3]
+
+
+def get_fresh_fn_fields() -> list[str]:
+    """fn_financial fields NOT in submissions (317 of 318 are fresh)."""
+    names = get_all_field_names()
+    fn = names.get("fn_financial", [])
+    return [f for f in fn if f.lower() not in _SATURATED_FIELDS]
+
+
+def get_fresh_estimate_fields() -> list[str]:
+    """Analyst estimate fields beyond est_eps and est_fcf."""
+    names = get_all_field_names()
+    ae = names.get("analyst_estimates", [])
+    return [f for f in ae if f.lower() not in _SATURATED_FIELDS
+            and f.startswith("est_") and len(f) > 5]
+
+
 def get_supply_chain_fields() -> list[str]:
     return get_all_field_names().get("supply_chain", [])
 
@@ -466,6 +503,15 @@ FAMILY_REQUIRED_CATEGORIES = {
     # Note: relationship uses rel_ret_* from supply_chain — available to all via team dataset
     # Note: earnings_momentum uses snt1_d1_* — available on WQ platform even if not in team Excel
 }
+
+# v7.2: Add EWAN_ONLY research families to blocking system
+try:
+    from research_templates import EWAN_ONLY_FAMILIES
+    for fam in EWAN_ONLY_FAMILIES:
+        if fam not in FAMILY_REQUIRED_CATEGORIES:
+            FAMILY_REQUIRED_CATEGORIES[fam] = ["model77"]
+except ImportError:
+    pass
 
 
 def get_blocked_families() -> set[str]:

@@ -15,6 +15,7 @@ from templates import (
     MODEL77_ALL_FIELDS, MODEL77_TIER1_FIELDS, MODEL77_TIER2_FIELDS, MODEL77_TIER3_FIELDS,
     MODEL77_NEGATIVE_DIRECTION, DATASET_NEUTRALIZATION,
     NEWS_EVENT_FIELDS, RP_UNDERUSED_FIELDS,
+    FRESH_FUND_FIELDS, FRESH_FN_FIELDS, FRESH_EST_FIELDS, RISK_BETA_FIELDS,
 )
 import templates as templates_mod
 
@@ -48,7 +49,27 @@ DEFAULT_BASE_FAMILY_WEIGHTS = {
     "expanded_fundamental": 4.0,  # Accruals, asset growth, profitability, net issuance
     "analyst_estimates": 3.5,     # Forward-looking analyst data
     "wq_proven": 4.0,            # WQ-documented proven expressions
+    # v7.2: Research-backed novel families — HIGHEST PRIORITY (fresh fields + new operators)
+    "corr_pipeline": 5.0,       # ts_corr chains — structurally novel
+    "regression_alpha": 5.0,    # ts_regression residuals — new operator
+    "earnings_quality": 5.0,    # Accruals anomaly — academic alpha
+    "fn_quarterly": 5.0,        # 317 untouched fn_financial fields
+    "deriv_score": 5.5,         # 24 fields, 100% untouched category
+    "beta_signal": 5.5,         # 16 fields, 100% untouched category
+    "nonlinear_power": 4.5,     # signed_power — new operator
+    "regime_ternary": 4.0,      # Ternary conditionals — structural novelty
+    "pipeline_select": 4.0,     # max() selector — adaptive
+    "fresh_fundamental": 5.0,   # Fresh fields, proven patterns
+    "fresh_estimates": 5.0,     # Fresh estimate fields
+    "model77_novel": 5.5,       # 3,238 untouched model77 fields (Ewan only)
 }
+
+# v7.2: Merge research template weights dynamically
+try:
+    from research_templates import RESEARCH_WEIGHTS
+    DEFAULT_BASE_FAMILY_WEIGHTS.update(RESEARCH_WEIGHTS)
+except ImportError:
+    pass
 
 
 class AlphaGenerator:
@@ -57,6 +78,113 @@ class AlphaGenerator:
         # v7.1: Data category rotation tracking
         self._category_usage = {cat: 0 for cat in self.DATA_CATEGORIES}
         self._generation_count = 0
+
+        # v7.2: Epoch engine state
+        self._epoch_start_time = None  # UTC timestamp when current epoch started
+        self._epoch_index = 0          # Current position in EPOCH_SCHEDULE
+        self._epoch_gen_count = 0      # Generations in current epoch
+        self._epoch_eligible_count = 0 # Eligible alphas found in current epoch
+        self._epoch_extended = False    # Whether current epoch has been extended
+        self._epoch_skipped = False     # Whether current epoch was skipped early
+        self._init_epoch()              # Set initial epoch from UTC time
+
+    # ============================
+    # EPOCH ENGINE
+    # ============================
+
+    def _init_epoch(self):
+        """Calculate which epoch we're in based on UTC time."""
+        import time
+        now = time.time()
+        # Use a fixed anchor: April 1 2026 00:00 UTC
+        anchor = 1743465600  # 2026-04-01 00:00:00 UTC
+        hours_since_anchor = (now - anchor) / 3600
+        epoch_num = int(hours_since_anchor / self.EPOCH_HOURS)
+        self._epoch_index = epoch_num % len(self.EPOCH_SCHEDULE)
+        self._epoch_start_time = anchor + (epoch_num * self.EPOCH_HOURS * 3600)
+        self._epoch_gen_count = 0
+        self._epoch_eligible_count = 0
+        self._epoch_extended = False
+        self._epoch_skipped = False
+        cats = self.EPOCH_SCHEDULE[self._epoch_index]
+        print(f"[EPOCH] Window {self._epoch_index}/{len(self.EPOCH_SCHEDULE)-1}: "
+              f"focusing on {cats}")
+
+    def _check_epoch_advance(self):
+        """Check if we should advance to next epoch (time-based or adaptive)."""
+        import time
+        now = time.time()
+        hours_in_epoch = (now - self._epoch_start_time) / 3600
+
+        should_advance = False
+
+        # Normal time-based advance
+        if hours_in_epoch >= self.EPOCH_HOURS:
+            # But extend if productive and not already extended
+            if (self._epoch_eligible_count >= self.EPOCH_EXTEND_THRESHOLD
+                    and not self._epoch_extended):
+                self._epoch_extended = True
+                self._epoch_start_time = now  # Reset timer for extension
+                cats = self.EPOCH_SCHEDULE[self._epoch_index]
+                print(f"[EPOCH] ⭐ Extending epoch {self._epoch_index} ({cats}) — "
+                      f"{self._epoch_eligible_count} eligible found, staying for another window")
+                return
+            should_advance = True
+
+        # Early skip: 0 eligible after threshold generations
+        if (self._epoch_gen_count >= self.EPOCH_SKIP_THRESHOLD
+                and self._epoch_eligible_count == 0
+                and not self._epoch_skipped):
+            self._epoch_skipped = True
+            should_advance = True
+            cats = self.EPOCH_SCHEDULE[self._epoch_index]
+            print(f"[EPOCH] ⏭️ Skipping epoch {self._epoch_index} ({cats}) — "
+                  f"0 eligible after {self._epoch_gen_count} generations")
+
+        if should_advance:
+            old_idx = self._epoch_index
+            self._epoch_index = (self._epoch_index + 1) % len(self.EPOCH_SCHEDULE)
+            self._epoch_start_time = now
+            self._epoch_gen_count = 0
+            self._epoch_eligible_count = 0
+            self._epoch_extended = False
+            self._epoch_skipped = False
+            cats = self.EPOCH_SCHEDULE[self._epoch_index]
+            print(f"[EPOCH] Advancing {old_idx} → {self._epoch_index}: now focusing on {cats}")
+
+    def get_active_categories(self) -> list[str]:
+        """Return the category names active in the current epoch."""
+        return list(self.EPOCH_SCHEDULE[self._epoch_index])
+
+    def notify_eligible(self, family: str):
+        """Called by bot when an eligible alpha is found — tracks per-epoch productivity."""
+        self._epoch_eligible_count += 1
+        cat = self._FAMILY_TO_CATEGORY.get(family, "other")
+        print(f"[EPOCH] Eligible #{self._epoch_eligible_count} in epoch {self._epoch_index} "
+              f"(family={family}, category={cat})")
+
+    def get_epoch_state(self) -> dict:
+        """Return epoch state for persistence."""
+        return {
+            "epoch_index": self._epoch_index,
+            "epoch_start_time": self._epoch_start_time,
+            "epoch_gen_count": self._epoch_gen_count,
+            "epoch_eligible_count": self._epoch_eligible_count,
+            "epoch_extended": self._epoch_extended,
+        }
+
+    def restore_epoch_state(self, state: dict):
+        """Restore epoch state from persistence."""
+        if not state:
+            return
+        self._epoch_index = state.get("epoch_index", self._epoch_index)
+        self._epoch_start_time = state.get("epoch_start_time", self._epoch_start_time)
+        self._epoch_gen_count = state.get("epoch_gen_count", 0)
+        self._epoch_eligible_count = state.get("epoch_eligible_count", 0)
+        self._epoch_extended = state.get("epoch_extended", False)
+        cats = self.EPOCH_SCHEDULE[self._epoch_index]
+        print(f"[EPOCH] Restored: window {self._epoch_index} ({cats}), "
+              f"{self._epoch_gen_count} gens, {self._epoch_eligible_count} eligible")
 
     # ============================
     # PUBLIC
@@ -388,20 +516,75 @@ class AlphaGenerator:
     DATA_CATEGORIES = {
         "price_technical": {"mean_reversion", "cross_sectional", "liquidity_scaled", "conditional",
                            "vol_adjusted", "volatility", "intraday", "intraday_pattern", "vol_gated",
-                           "momentum", "volume_flow", "price_vol_corr"},
+                           "momentum", "volume_flow", "price_vol_corr",
+                           "regime_ternary",
+                           # Research: mean reversion & technical
+                           "mr_short_term", "mr_vol_gated", "mr_regression_residual",
+                           "mr_volume_conditioned", "mr_long_term",
+                           "tech_rsi_like", "tech_bollinger_like", "tech_macd_like",
+                           "tech_breakout", "tech_trend_strength"},
         "fundamental": {"fundamental_value", "quality_trend", "size_value", "simple_ratio",
                        "expanded_fundamental", "fundamental_vol", "fn_financial", "fundamental",
-                       "fscore", "accruals_quality"},
+                       "fscore", "accruals_quality",
+                       "fresh_fundamental", "fn_quarterly", "earnings_quality",
+                       # Research: value, profitability, quality, investment
+                       "value_book", "value_earnings_yield", "value_cashflow_yield", "value_dividend",
+                       "profit_gross", "profit_margins", "profit_return_on_capital", "profit_cash_return_quarterly",
+                       "quality_accruals", "quality_earnings_stability", "quality_balance_sheet_quarterly",
+                       "quality_cash_earnings",
+                       "invest_asset_growth", "invest_capex", "invest_net_issuance", "invest_rnd",
+                       "gap_piotroski", "gap_cash_conversion",
+                       # Research: leverage/credit
+                       "lev_debt_ratios", "lev_interest_coverage", "lev_distress", "lev_credit_quality_qoq"},
         "analyst_sentiment": {"earnings_momentum", "analyst_estimates", "analyst_sentiment",
-                             "analyst_deep", "fundamental_scores"},
+                             "analyst_deep", "fundamental_scores",
+                             "fresh_estimates",
+                             # Research: momentum, earnings, analyst
+                             "momentum_price", "momentum_earnings", "momentum_estimate_revision", "momentum_industry",
+                             "earnings_sue_pead", "earnings_quality_quarterly", "earnings_surprise_magnitude", "earnings_torpedo",
+                             "analyst_revision_breadth", "analyst_coverage_dispersion",
+                             "analyst_target_price", "analyst_recommendations", "analyst_derivative_scores"},
         "news_alt": {"news_sentiment", "ravenpack_cat", "rp_category_fresh", "news_event_signal",
-                    "vector_data", "social_scalar", "sentiment", "relationship"},
-        "options": {"options_vol", "options_analytics", "hist_vol", "iv_term_structure"},
+                    "vector_data", "social_scalar", "sentiment", "relationship",
+                    # Research: sentiment, seasonality, events
+                    "sent_social_buzz", "sent_level_change", "sent_ravenpack",
+                    "sent_news_reaction", "sent_price_divergence",
+                    "season_earnings_calendar", "season_event_recency", "season_data_release_mr",
+                    "event_mna", "event_insider", "event_business", "event_credit"},
+        "options": {"options_vol", "options_analytics", "hist_vol", "iv_term_structure",
+                   # Research: options, volatility
+                   "opt_call_breakeven_ts", "opt_put_breakeven_ts", "opt_forward_price",
+                   "opt_breakeven_dynamics", "opt_call_put_skew",
+                   "vol_low_vol", "vol_term_structure", "vol_realized_vs_implied", "vol_of_vol",
+                   "gap_iv_momentum"},
         "model_supply": {"model77_anomaly", "model77_combo", "supply_chain", "risk_beta",
-                        "risk_metrics", "derivative_interaction", "cross_dimension"},
+                        "risk_metrics", "derivative_interaction", "cross_dimension",
+                        "model77_novel", "deriv_score", "beta_signal",
+                        # Research: model77, supply chain, risk
+                        "m77_value", "m77_profitability", "m77_quality", "m77_growth",
+                        "m77_momentum", "m77_vol_risk", "m77_credit", "m77_mega_composite",
+                        "sc_network_centrality", "sc_breadth", "sc_customer_returns", "sc_hierarchy_sector",
+                        "risk_bab", "risk_idiosyncratic", "risk_systematic_decomp", "risk_correlation_regime",
+                        "gap_beta_mean_reversion", "gap_corr_regime_shift",
+                        "risk_treynor"},
         "combo_proven": {"signal_combo", "combo_factor", "wild_combos", "vol_regime",
                         "wq_proven", "tutorial_proven", "high_sharpe", "evolved",
                         "griff_multi_factor", "griff_intraday"},
+        "novel_operators": {"corr_pipeline", "regression_alpha", "nonlinear_power",
+                           "pipeline_select"},
+        "research_composites": {
+                        # Research: size, interactions, derivatives, composites
+                        "size_conditioned_value", "size_conditioned_momentum",
+                        "size_conditioned_quality", "size_microcap_liquidity",
+                        "liq_amihud", "liq_volume_trend", "liq_turnover_reversal",
+                        "liq_risk_premium", "liq_volume_price_divergence",
+                        "interact_value_x_quality", "interact_momentum_x_quality",
+                        "interact_value_x_momentum", "interact_size_x_value_x_quality",
+                        "interact_sentiment_x_fundamental",
+                        "deriv_fscore_composites", "deriv_fscore_bfl", "deriv_fscore_momentum",
+                        "deriv_fscore_x_price", "deriv_rank_composites",
+                        "composite_vqm", "composite_risk_adjusted", "composite_cross_category",
+                        "composite_adaptive", "composite_adaptive_regime"},
     }
 
     # Reverse lookup: family → category
@@ -409,6 +592,41 @@ class AlphaGenerator:
     for _cat, _fams in DATA_CATEGORIES.items():
         for _f in _fams:
             _FAMILY_TO_CATEGORY[_f] = _cat
+
+    # ═══════════════════════════════════════════════════════════
+    # v7.2: EPOCH-BASED ROTATION ENGINE
+    # Instead of random scatter, the bot focuses on 2-3 categories per
+    # 12-hour submission window, then rotates. Over 2 weeks (28 windows)
+    # every category gets deep exploration. Adaptive: extend productive
+    # epochs, skip unproductive ones early.
+    # ═══════════════════════════════════════════════════════════
+
+    EPOCH_HOURS = 12  # Each epoch lasts 12 hours (= 1 submission window)
+
+    # Schedule: each epoch focuses on 2-3 categories
+    # Ordered to frontload fresh/untouched data categories
+    EPOCH_SCHEDULE = [
+        # Epoch 0: Fresh untouched data — options + supply chain/risk
+        ["options", "model_supply"],
+        # Epoch 1: Research composites — factor interactions, fscores, cross-category
+        ["research_composites", "novel_operators"],
+        # Epoch 2: Sentiment + news + events
+        ["news_alt", "analyst_sentiment"],
+        # Epoch 3: Deep fundamentals — value, quality, profitability, leverage
+        ["fundamental", "price_technical"],
+        # Epoch 4: Proven combos + revisit best performers
+        ["combo_proven", "options", "research_composites"],
+        # Epoch 5: Model77 heavy + analyst deep dive
+        ["model_supply", "analyst_sentiment"],
+        # Epoch 6: Cross-pollination — composites + fundamentals
+        ["research_composites", "fundamental"],
+        # Epoch 7: Technical + news for diversity
+        ["price_technical", "news_alt"],
+    ]
+    # After 8 epochs (4 days), cycle repeats — each category gets 2-4 windows per cycle
+
+    EPOCH_SKIP_THRESHOLD = 120     # Skip epoch early if 0 eligible after this many gens
+    EPOCH_EXTEND_THRESHOLD = 3     # Extend epoch if this many eligible found
 
     def _sample_family(self, bias):
         fams = list(TEMPLATE_LIBRARY.keys())
@@ -425,18 +643,16 @@ class AlphaGenerator:
 
         config_weights = getattr(config, "FAMILY_BASE_WEIGHTS", {})
 
-        # v7.1: Data category rotation — boost underused categories
+        # v7.2: Epoch-based rotation — check if we need to advance
         self._generation_count += 1
-        cat_boost = {}
-        if self._generation_count > 5:
-            total_usage = max(sum(self._category_usage.values()), 1)
-            for cat, count in self._category_usage.items():
-                # Inverse frequency boost: less-used categories get higher weight
-                expected = total_usage / len(self._category_usage)
-                if count < expected * 0.5:
-                    cat_boost[cat] = 2.0  # Strong boost for neglected categories
-                elif count < expected * 0.8:
-                    cat_boost[cat] = 1.3  # Mild boost
+        self._epoch_gen_count += 1
+        self._check_epoch_advance()
+
+        # v7.2: Get active categories for this epoch
+        active_cats = set(self.get_active_categories())
+
+        # 10% exploration outside epoch for diversity
+        explore_outside = self.rng.random() < 0.10
 
         weights = []
         for fam in fams:
@@ -448,10 +664,16 @@ class AlphaGenerator:
                 base *= float(config_weights[fam])
             if bias:
                 base *= bias.get(fam, 1.0)
-            # Apply category rotation boost
+
+            # v7.2: Epoch filtering — heavy weight for epoch categories
             cat = self._FAMILY_TO_CATEGORY.get(fam, "")
-            if cat in cat_boost:
-                base *= cat_boost[cat]
+            if not explore_outside:
+                if cat in active_cats:
+                    base *= 10.0  # Strong boost for epoch categories
+                else:
+                    base *= 0.02  # Near-zero for non-epoch (but not blocked)
+            # When exploring outside, use normal weights (no epoch filter)
+
             weights.append(max(base, 0.001))
 
         chosen = self.rng.choices(fams, weights=weights, k=1)[0]
@@ -796,6 +1018,23 @@ class AlphaGenerator:
         if "{rp_field}" in template:
             if RP_UNDERUSED_FIELDS:
                 p["rp_field"] = self.rng.choice(RP_UNDERUSED_FIELDS)
+        # v7.1.2: Fresh field pools — fields NOT in any existing submission
+        if "{fresh_fund_field}" in template:
+            if FRESH_FUND_FIELDS:
+                p["fresh_fund_field"] = self.rng.choice(FRESH_FUND_FIELDS)
+        if "{fn_field}" in template:
+            if FRESH_FN_FIELDS:
+                p["fn_field"] = self.rng.choice(FRESH_FN_FIELDS)
+        if "{fresh_est_field}" in template:
+            if FRESH_EST_FIELDS:
+                p["fresh_est_field"] = self.rng.choice(FRESH_EST_FIELDS)
+        # v7.2: Research-backed novel template fields
+        if "{deriv_field}" in template:
+            if DERIVATIVE_FIELDS:
+                p["deriv_field"] = self.rng.choice(DERIVATIVE_FIELDS)
+        if "{beta_field}" in template:
+            if RISK_BETA_FIELDS:
+                p["beta_field"] = self.rng.choice(RISK_BETA_FIELDS)
         return p
 
     def _mutate_params_for_mode(self, params, template, mode: str, metrics_hint: dict[str, Any] | None = None):

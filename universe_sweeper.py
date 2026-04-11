@@ -77,6 +77,9 @@ class SweepJob:
 class UniverseSweeper:
     """Manages universe sweep queue for eligible alphas."""
 
+    # v7.1: Sweep budget — prevent burning hundreds of sims on re-sweeps after restart
+    SWEEP_BUDGET_PER_SESSION = 50
+
     def __init__(self, storage, client):
         self.storage = storage
         self.client = client
@@ -86,7 +89,11 @@ class UniverseSweeper:
         self._sweep_count = 0
 
     def _make_key(self, expr: str, universe: str, neut: str, decay: int) -> str:
-        return f"{expr[:80]}:{universe}:{neut}:{decay}"
+        # v7.1: Use hash for compact storage — prevents Supabase JSON truncation
+        # with 500+ swept pairs (~40KB as full strings → ~8KB as hashes)
+        import hashlib
+        raw = f"{expr}:{universe}:{neut}:{decay}"
+        return hashlib.md5(raw.encode()).hexdigest()[:12]
 
     def queue_sweep(
         self,
@@ -193,9 +200,16 @@ class UniverseSweeper:
     def try_sweep(self) -> dict[str, Any] | None:
         """
         Pop one sweep job and return it as a candidate dict for simulation.
-        Returns None if queue empty.
+        Returns None if queue empty or budget exhausted.
         """
         if not self._queue:
+            return None
+
+        # v7.1: Sweep budget — after N sweeps, stop and let exploration happen
+        if self._sweep_count >= self.SWEEP_BUDGET_PER_SESSION:
+            if self._sweep_count == self.SWEEP_BUDGET_PER_SESSION:
+                print(f"[SWEEP_BUDGET] {self._sweep_count} sweeps done — pausing sweeps, {len(self._queue)} remaining in queue")
+                self._sweep_count += 1  # prevent repeat message
             return None
 
         job = self._queue.pop(0)

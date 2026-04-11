@@ -190,7 +190,63 @@ class AlphaBot:
         except Exception as exc:
             print(f"[WARM_START] Failed to load rejected cores: {exc}")
 
-        # 4. Load already-swept expression:universe pairs for universe sweeper
+        # 4. Restore refinement counters + swept keys from last shutdown
+        #    MUST happen before sweep queue loading so _swept is complete
+        try:
+            bot_state = self.storage.get_bot_state()
+            if bot_state:
+                snapshot = bot_state.get("config_snapshot")
+                if snapshot:
+                    import json as _json
+                    counters = _json.loads(snapshot) if isinstance(snapshot, str) else (snapshot or {})
+                    if counters.get("refinement_attempts_by_base"):
+                        self.refinement_attempts_by_base = counters["refinement_attempts_by_base"]
+                    if counters.get("refinement_attempts_by_core"):
+                        self.refinement_attempts_by_core = counters["refinement_attempts_by_core"]
+                    if counters.get("core_signal_exhausted"):
+                        self.core_signal_exhausted = counters["core_signal_exhausted"]
+                    if counters.get("family_template_exhausted"):
+                        self.family_template_exhausted = counters["family_template_exhausted"]
+                    # v7.1: Restore score-blocked cores and swept pairs
+                    if counters.get("score_negative_cores"):
+                        self._score_negative_cores = set(counters["score_negative_cores"])
+                    if counters.get("swept_keys") and hasattr(self, "universe_sweeper"):
+                        prev_swept = len(self.universe_sweeper._swept)
+                        self.universe_sweeper._swept.update(counters["swept_keys"])
+                        new_swept = len(self.universe_sweeper._swept) - prev_swept
+                        if new_swept:
+                            print(f"[WARM_START] Restored {new_swept} swept pairs from last session")
+                    # v7.2: Restore category rotation state so bot doesn't re-explore same categories
+                    if counters.get("category_usage") and hasattr(self, "generator"):
+                        saved_usage = counters["category_usage"]
+                        for cat, count in saved_usage.items():
+                            if cat in self.generator._category_usage:
+                                self.generator._category_usage[cat] = count
+                        self.generator._generation_count = counters.get("generation_count", 0)
+                        print(f"[WARM_START] Restored category rotation: {sum(saved_usage.values())} total picks across {len(saved_usage)} categories")
+                    # v7.2: Restore epoch engine state
+                    if counters.get("epoch_state") and hasattr(self.generator, "restore_epoch_state"):
+                        self.generator.restore_epoch_state(counters["epoch_state"])
+                    # v7.2: Restore cached stats to avoid querying 28K rows on restart
+                    if counters.get("family_stats_cache"):
+                        self._family_stats_cache = counters["family_stats_cache"]
+                        import time as _t; self._family_stats_cache_time = _t.time()
+                        print(f"[WARM_START] Restored cached family stats ({len(self._family_stats_cache)} families)")
+                    if counters.get("template_stats_cache"):
+                        self._template_stats_cache = counters["template_stats_cache"]
+                        import time as _t; self._template_stats_cache_time = _t.time()
+                        print(f"[WARM_START] Restored cached template stats ({len(self._template_stats_cache)} templates)")
+                    total_restored = sum(len(v) for v in counters.values() if isinstance(v, dict))
+                    n_blocked = len(counters.get("score_negative_cores", []))
+                    if total_restored or n_blocked:
+                        print(f"[WARM_START] Restored {total_restored} refinement counter entries"
+                              f"{f', {n_blocked} blocked cores' if n_blocked else ''} from last session")
+        except Exception as exc:
+            print(f"[WARM_START] Failed to restore refinement counters: {exc}")
+
+        # 5. Load already-swept expression:universe pairs + queue new sweeps
+        #    Now _swept has both submitted keys AND auto-saved keys, so queue_sweep
+        #    won't re-queue previously swept (but not submitted) combos
         try:
             submitted_rows = self.storage.get_submitted_candidate_rows(limit=500)
             self.universe_sweeper.load_already_swept(submitted_rows)
@@ -217,39 +273,6 @@ class AlphaBot:
                     )
         except Exception as exc:
             print(f"[WARM_START] Failed to init universe sweeper: {exc}")
-
-        # 5. Restore refinement counters from last shutdown
-        try:
-            bot_state = self.storage.get_bot_state()
-            if bot_state:
-                snapshot = bot_state.get("config_snapshot")
-                if snapshot:
-                    import json as _json
-                    counters = _json.loads(snapshot) if isinstance(snapshot, str) else (snapshot or {})
-                    if counters.get("refinement_attempts_by_base"):
-                        self.refinement_attempts_by_base = counters["refinement_attempts_by_base"]
-                    if counters.get("refinement_attempts_by_core"):
-                        self.refinement_attempts_by_core = counters["refinement_attempts_by_core"]
-                    if counters.get("core_signal_exhausted"):
-                        self.core_signal_exhausted = counters["core_signal_exhausted"]
-                    if counters.get("family_template_exhausted"):
-                        self.family_template_exhausted = counters["family_template_exhausted"]
-                    # v7.1: Restore score-blocked cores and swept pairs
-                    if counters.get("score_negative_cores"):
-                        self._score_negative_cores = set(counters["score_negative_cores"])
-                    if counters.get("swept_keys") and hasattr(self, "universe_sweeper"):
-                        prev_swept = len(self.universe_sweeper._swept)
-                        self.universe_sweeper._swept.update(counters["swept_keys"])
-                        new_swept = len(self.universe_sweeper._swept) - prev_swept
-                        if new_swept:
-                            print(f"[WARM_START] Restored {new_swept} swept pairs from last session")
-                    total_restored = sum(len(v) for v in counters.values() if isinstance(v, dict))
-                    n_blocked = len(counters.get("score_negative_cores", []))
-                    if total_restored or n_blocked:
-                        print(f"[WARM_START] Restored {total_restored} refinement counter entries"
-                              f"{f', {n_blocked} blocked cores' if n_blocked else ''} from last session")
-        except Exception as exc:
-            print(f"[WARM_START] Failed to restore refinement counters: {exc}")
 
     # =========================================================
     # Main loop
@@ -279,6 +302,18 @@ class AlphaBot:
                 pipeline = SubmitPipeline(self.storage, self.client, config)
                 result = pipeline.run()
                 print(f"[SUBMIT_PIPELINE] Done: {result}")
+
+                # v7.2: Check teammate scores after own pipeline
+                if getattr(config, "CHECK_TEAMMATE_SCORES", False):
+                    teammates = getattr(config, "TEAMMATE_OWNERS", [])
+                    if teammates:
+                        try:
+                            from submit_pipeline import TeammateScoreChecker
+                            checker = TeammateScoreChecker(self.storage, self.client, config)
+                            tm_result = checker.run(teammates)
+                            print(f"[TEAMMATE_CHECK] Done: {tm_result}")
+                        except Exception as tm_exc:
+                            print(f"[TEAMMATE_CHECK_ERROR] {tm_exc}")
             else:
                 self._last_submit_hour = now.hour
         except Exception as exc:
@@ -516,6 +551,12 @@ class AlphaBot:
             if self._stall_level > 0:
                 print(f"[STALL_RECOVERED] level was {self._stall_level}, resetting")
                 self._stall_level = 0
+            # v7.2: Notify epoch engine of eligible alpha
+            try:
+                fam = candidate_row.get("family", "")
+                self.generator.notify_eligible(fam)
+            except Exception:
+                pass
 
         sharpe_str = "None" if metrics.sharpe is None else f"{metrics.sharpe:.3f}"
         fitness_str = "None" if metrics.fitness is None else f"{metrics.fitness:.3f}"
@@ -581,6 +622,33 @@ class AlphaBot:
                     self.storage.prune_activity_log()
                 except Exception:
                     pass
+
+            # v7.1: Auto-save state every report cycle to survive hard kills
+            try:
+                counters = {
+                    "refinement_attempts_by_base": getattr(self, "refinement_attempts_by_base", {}),
+                    "refinement_attempts_by_core": getattr(self, "refinement_attempts_by_core", {}),
+                    "core_signal_exhausted": getattr(self, "core_signal_exhausted", {}),
+                    "family_template_exhausted": getattr(self, "family_template_exhausted", {}),
+                    "score_negative_cores": list(getattr(self, "_score_negative_cores", set())),
+                    "swept_keys": list(getattr(self.universe_sweeper, "_swept", set())) if hasattr(self, "universe_sweeper") else [],
+                    # v7.2: Persist category rotation state across restarts
+                    "category_usage": dict(getattr(self.generator, "_category_usage", {})),
+                    "generation_count": getattr(self.generator, "_generation_count", 0),
+                    # v7.2: Persist epoch engine state
+                    "epoch_state": self.generator.get_epoch_state() if hasattr(self.generator, "get_epoch_state") else {},
+                    # v7.2: Cache stats to avoid querying 28K rows on restart
+                    "family_stats_cache": getattr(self, "_family_stats_cache", {}),
+                    "template_stats_cache": getattr(self, "_template_stats_cache", {}),
+                }
+                self.storage.save_bot_state(
+                    status="running",
+                    completion_count=self.total_completions,
+                    interrupted_refinement_ids=[],
+                    refinement_counters=counters,
+                )
+            except Exception:
+                pass  # Non-critical — don't crash the bot for a save failure
 
     def _maybe_queue_refinement(self, candidate_id: str, run_id: str, metrics) -> None:
         sharpe = metrics.sharpe
@@ -1294,7 +1362,7 @@ class AlphaBot:
         try:
             submitted_rows = self.storage.get_all_team_submissions(limit=500)
         except Exception:
-            submitted_rows = self.storage.get_submitted_candidate_rows(limit=300)
+            submitted_rows = self.storage.get_submitted_candidate_rows(limit=100)
 
         if not submitted_rows:
             return {"fits": True, "max_similarity": 0.0, "reason": "no_prior_submissions"}
@@ -1539,7 +1607,7 @@ class AlphaBot:
 
     def _get_submitted_family_set(self) -> set[str]:
         """Return set of families that have been successfully submitted."""
-        submitted_rows = self.storage.get_submitted_candidate_rows(limit=300)
+        submitted_rows = self.storage.get_submitted_candidate_rows(limit=100)
         families = set()
         for row in submitted_rows:
             try:
@@ -1550,7 +1618,7 @@ class AlphaBot:
 
     def _get_submitted_template_set(self) -> set[str]:
         """Return set of template_ids that have been successfully submitted."""
-        submitted_rows = self.storage.get_submitted_candidate_rows(limit=300)
+        submitted_rows = self.storage.get_submitted_candidate_rows(limit=100)
         templates = set()
         for row in submitted_rows:
             try:
@@ -1567,7 +1635,7 @@ class AlphaBot:
         # v7.0: Cache stats for 3 minutes to reduce Supabase egress
         import time
         now = time.time()
-        if hasattr(self, '_template_stats_cache_time') and (now - self._template_stats_cache_time) < 180:
+        if hasattr(self, '_template_stats_cache_time') and (now - self._template_stats_cache_time) < 1800:  # 30min cache
             return self._template_stats_cache
         rows = self.storage.get_recent_template_stats(limit=config.TEMPLATE_SCORE_LOOKBACK_RUNS)
         out: dict[str, dict] = {}
@@ -1586,7 +1654,7 @@ class AlphaBot:
     def _family_stats_map(self) -> dict[str, dict]:
         import time
         now = time.time()
-        if hasattr(self, '_family_stats_cache_time') and (now - self._family_stats_cache_time) < 180:
+        if hasattr(self, '_family_stats_cache_time') and (now - self._family_stats_cache_time) < 1800:  # 30min cache
             return self._family_stats_cache
         rows = self.storage.get_recent_family_stats(limit=config.TEMPLATE_SCORE_LOOKBACK_RUNS)
         out: dict[str, dict] = {}

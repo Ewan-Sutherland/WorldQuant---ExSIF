@@ -412,3 +412,144 @@ if __name__ == "__main__":
     pipeline = SubmitPipeline(storage, client, config)
     result = pipeline.run()
     print(f"\nResult: {result}")
+
+
+# ═══════════════════════════════════════════════════════════════
+# v7.2: Teammate score checking
+# ═══════════════════════════════════════════════════════════════
+
+class TeammateScoreChecker:
+    """
+    After your own submission pipeline runs, check scores for
+    teammates' ready alphas. Does NOT submit — just checks scores
+    and updates them in Supabase so you can submit manually.
+    """
+
+    DELAY_BETWEEN_CHECKS = 4  # seconds between API calls
+
+    def __init__(self, storage, client, config):
+        self.storage = storage
+        self.client = client
+        self.config = config
+
+    def run(self, teammate_owners: list[str]) -> dict:
+        """Check scores for all teammates' ready alphas."""
+        import time
+        from datetime import datetime, timezone
+
+        total_checked = 0
+        total_positive = 0
+        total_negative = 0
+        total_unknown = 0
+
+        for owner in teammate_owners:
+            print(f"\n{'='*60}")
+            print(f"  TEAMMATE SCORE CHECK — {owner}")
+            print(f"  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+            print(f"{'='*60}\n")
+
+            # Load their ready + unverified alphas
+            alphas = self._load_teammate_alphas(owner)
+            if not alphas:
+                print(f"  No ready/unverified alphas for {owner}")
+                continue
+
+            print(f"  Found {len(alphas)} alphas to check\n")
+
+            for i, a in enumerate(alphas):
+                alpha_id = a.get("alpha_id")
+                expr = a.get("expression", "")
+                family = a.get("family", "")
+                sharpe = a.get("sharpe", 0)
+                old_score = a.get("score_change")
+
+                if not alpha_id:
+                    print(f"    [{i+1}/{len(alphas)}] No alpha_id — skipping")
+                    total_unknown += 1
+                    continue
+
+                # Try checking score with current client
+                score = None
+                for attempt in range(3):
+                    try:
+                        perf = self.client.check_before_after_performance(
+                            alpha_id,
+                            competition_id=self.config.IQC_COMPETITION_ID,
+                        )
+                        score = perf.get("_score_change")
+                        score_before = perf.get("_score_before")
+                        score_after = perf.get("_score_after")
+                        if score is not None:
+                            break
+                    except Exception as exc:
+                        if attempt == 2:
+                            print(f"    [{i+1}/{len(alphas)}] ⚠️ API error: {exc}")
+                    if attempt < 2:
+                        time.sleep(self.DELAY_BETWEEN_CHECKS)
+
+                if score is not None:
+                    direction = "📈" if score > 0 else "📉" if score < 0 else "➡️"
+                    print(f"    [{i+1}/{len(alphas)}] {direction} {family} S={sharpe:.2f} → "
+                          f"score: {score:+.0f} (before={score_before or 0:.0f}, after={score_after or 0:.0f})")
+
+                    # Update local dict so summary uses fresh data
+                    a["score_change"] = score
+                    a["score_before"] = score_before
+                    a["score_after"] = score_after
+
+                    # Update in Supabase
+                    try:
+                        self.storage._patch("ready_alphas", {"id": a["id"]}, {
+                            "score_before": score_before,
+                            "score_after": score_after,
+                            "score_change": score,
+                            "status": "ready" if score >= 0 else "rejected",
+                        })
+                    except Exception as exc:
+                        print(f"    ⚠️ Could not update score in DB: {exc}")
+
+                    if score > 0:
+                        total_positive += 1
+                    elif score < 0:
+                        total_negative += 1
+                    total_checked += 1
+                else:
+                    print(f"    [{i+1}/{len(alphas)}] ❓ {family} S={sharpe:.2f} → score unavailable")
+                    total_unknown += 1
+
+                time.sleep(self.DELAY_BETWEEN_CHECKS)
+
+            # Print summary for this teammate
+            pos_alphas = [a for a in alphas if a.get("score_change") is not None and a["score_change"] > 0]
+            if pos_alphas:
+                print(f"\n  ✅ POSITIVE ALPHAS FOR {owner} (submit these manually):")
+                for a in sorted(pos_alphas, key=lambda x: x.get("score_change", 0), reverse=True):
+                    print(f"    alpha_id={a.get('alpha_id')} score={a.get('score_change', '?'):+.0f} "
+                          f"S={a.get('sharpe', 0):.2f} {a.get('family', '')}")
+
+        print(f"\n{'='*60}")
+        print(f"  TEAMMATE CHECK COMPLETE")
+        print(f"  Checked: {total_checked}  Positive: {total_positive}  "
+              f"Negative: {total_negative}  Unknown: {total_unknown}")
+        print(f"{'='*60}\n")
+
+        return {
+            "checked": total_checked,
+            "positive": total_positive,
+            "negative": total_negative,
+            "unknown": total_unknown,
+        }
+
+    def _load_teammate_alphas(self, owner: str) -> list[dict]:
+        """Load ready + unverified alphas for a teammate."""
+        try:
+            rows = self.storage._get("ready_alphas", {
+                "owner": f"eq.{owner}",
+                "status": "in.(ready,unverified)",
+                "select": "*",
+                "order": "sharpe.desc",
+            })
+            return rows or []
+        except Exception as e:
+            print(f"  ERROR loading alphas for {owner}: {e}")
+            return []

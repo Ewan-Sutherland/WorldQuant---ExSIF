@@ -77,6 +77,7 @@ class SignalCombiner:
         self.rng = random.Random()
         self._near_passers_by_category: dict[str, list[dict]] = {}
         self._last_refresh = 0
+        self._submitted_fields: set[str] = set()  # v7.1: fields in existing submissions
 
     def refresh_near_passers(self, min_sharpe: float = 0.90, min_fitness: float = 0.40) -> None:
         """Load near-passers from storage, grouped by data category."""
@@ -84,6 +85,17 @@ class SignalCombiner:
             return
 
         self._near_passers_by_category.clear()
+
+        # v7.1: Load submitted expression fields for novelty scoring
+        try:
+            submitted = self.storage.get_submitted_candidate_rows(limit=200)
+            self._submitted_fields = set()
+            for row in submitted:
+                expr = row.get("canonical_expression", "")
+                if expr:
+                    self._submitted_fields.update(self._extract_fields(expr))
+        except Exception:
+            pass
 
         try:
             rows = self.storage.get_similarity_reference_candidates(
@@ -181,12 +193,28 @@ class SignalCombiner:
         else:
             chosen_cats = self.rng.sample(available_cats, n_signals)
 
-        # Pick the best signal from each category (with some randomization)
+        # Pick the best signal from each category (with novelty weighting)
         components = []
         for cat in chosen_cats:
             entries = self._near_passers_by_category[cat]
-            pool = entries[:min(3, len(entries))]
-            chosen = self.rng.choice(pool)
+            pool = entries[:min(5, len(entries))]  # v7.1: wider pool (was 3)
+
+            # v7.1: Score by novelty — prefer near-passers with fields NOT in submissions
+            if self._submitted_fields and len(pool) > 1:
+                scored = []
+                for entry in pool:
+                    fields = set(self._extract_fields(entry["expression"]))
+                    if fields:
+                        overlap = len(fields & self._submitted_fields) / len(fields)
+                        novelty = 1.0 - overlap  # 1.0 = completely new fields, 0.0 = all submitted
+                    else:
+                        novelty = 0.5
+                    # Weight: novelty matters more than sharpe for decorrelation
+                    weight = max(0.01, novelty * 2.0 + entry["sharpe"] * 0.5)
+                    scored.append((entry, weight))
+                chosen = self.rng.choices([s[0] for s in scored], weights=[s[1] for s in scored], k=1)[0]
+            else:
+                chosen = self.rng.choice(pool)
             components.append(chosen)
 
         # Pick combination mode — research says multiplicative raw is best
@@ -267,6 +295,25 @@ class SignalCombiner:
         else:
             exprs = [self._wrap_as_rank_component(c["expression"]) for c in components]
             return f"{exprs[0]} + {exprs[1]} + {exprs[2]}"
+
+    @staticmethod
+    def _extract_fields(expr: str) -> list[str]:
+        """v7.1: Extract data field names from expression for novelty scoring."""
+        import re
+        operators = {
+            "rank", "ts_rank", "ts_zscore", "ts_delta", "ts_mean", "ts_std_dev",
+            "ts_decay_linear", "ts_corr", "ts_regression", "ts_sum", "ts_backfill",
+            "ts_delay", "ts_av_diff", "ts_arg_max", "ts_arg_min", "ts_step",
+            "ts_product", "ts_min", "ts_max", "ts_count_nans", "ts_scale",
+            "group_rank", "group_zscore", "group_neutralize", "group_vector_neut",
+            "zscore", "winsorize", "trade_when", "hump", "scale", "log", "abs",
+            "max", "min", "power", "vec_avg", "vec_sum", "vec_count",
+            "bucket", "quantile", "range", "subindustry", "industry", "sector",
+            "market", "returns", "close", "open", "high", "low",
+            "volume", "vwap", "cap", "adv20",
+        }
+        tokens = re.findall(r'[a-z][a-z0-9_]+', expr.lower())
+        return [t for t in tokens if t not in operators and len(t) > 3]
 
     def _extract_raw_signal(self, expr: str) -> str:
         """

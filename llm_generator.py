@@ -366,13 +366,20 @@ Step 2: Choose 1-2 data fields that CAPTURE that inefficiency.
 Step 3: Apply the MINIMUM operators needed — simpler = better fitness.
 Step 4: Verify the expression is structurally different from the submitted list.
 
-ALREADY SATURATED — DO NOT USE AS PRIMARY SIGNAL:
-  debt, ts_zscore(debt, *), close/debt
-  ts_mean(returns, *), ts_zscore(returns, *), ts_decay_linear(rank(-rank(ts_zscore(returns,*))))
-  operating_income/cap, ts_rank(operating_income/cap, 252)
-  est_eps/close, group_rank(ts_rank(est_eps/close, 60), industry)
-  (close-vwap)/vwap as standalone signal
-  one_year_change_total_assets, asset_growth_rate as standalone
+ALREADY SATURATED — DO NOT USE AS PRIMARY SIGNAL (these will fail self-correlation check):
+  assets, cash_burn_rate, cashflow, cashflow_op, cogs, debt,
+  earnings_momentum_composite_score, enterprise_value, equity,
+  est_eps, est_fcf, fn_liab_fair_val_l1_a, liabilities,
+  historical_volatility_20, historical_volatility_60,
+  implied_volatility_call_30, implied_volatility_call_60,
+  implied_volatility_call_120, implied_volatility_call_270,
+  implied_volatility_put_30, implied_volatility_put_120, implied_volatility_put_270,
+  news_max_up_ret, news_pct_1min, nws12_afterhsz_sl,
+  one_year_change_total_assets, operating_income,
+  parkinson_volatility_120, pcr_oi_270,
+  rel_ret_comp, rp_ess_mna, rp_ess_revenue, sales,
+  scl12_alltype_buzzvec, snt1_d1_earningssurprise, snt1_d1_netearningsrevision
+  ALSO AVOID: simple rank(-returns), rank(-ts_zscore(returns,N)), debt/cap, close/vwap
 
 ═══════════════════════════════════════════════════
 OPERATOR REFERENCE
@@ -407,66 +414,63 @@ OTHER: winsorize(x, std=4), densify(x), hump(x, hump=0.01) — hump reduces turn
 LOCKED — DO NOT USE: ts_skewness, ts_kurtosis, ts_momentum
 
 ═══════════════════════════════════════════════════
-DATA FIELDS
+DATA FIELDS — PRIORITIZE FRESH (★) FIELDS OVER COMMON ONES
 ═══════════════════════════════════════════════════
 
 PRICE & VOLUME: close, open, high, low, vwap, returns, volume, adv20, cap, sharesout
 
-FUNDAMENTAL (quarterly, use 60-252 day lookbacks):
-  assets, sales, income, cash, debt, equity, eps, ebitda, ebit, enterprise_value,
-  bookvalue_ps, capex, cashflow, cashflow_op, cogs, current_ratio,
-  assets_curr, debt_lt, debt_st, depre_amort, employee, retained_earnings,
-  operating_income, gross_profit, inventory_turnover, rd_expense
+★ FRESH FUNDAMENTAL (high priority — rarely used):
+  book_value, tangible_book_value, ebit, ebitda, gross_profit, net_income,
+  retained_earnings, revenue, dividend_yield, interest_expense, depre_amort,
+  working_capital, current_ratio, inventory_turnover, eps, bookvalue_ps,
+  debt_lt, debt_st, cash, rnd_expense, capex
 
-FUNDAMENTAL SCORES (model16 — sparse, use ts_backfill or multiply by rank(cap)):
-  fscore_bfl_value, fscore_bfl_momentum, fscore_bfl_quality, fscore_bfl_growth,
-  fscore_bfl_profitability, fscore_bfl_total, fscore_bfl_surface, fscore_bfl_surface_accel
+★ FRESH fn_QUARTERLY (wrap in ts_backfill(field, 60)):
+  fn_revenue_q, fn_ebitda_q, fn_net_income_q, fn_oper_cash_flow_q,
+  fn_free_cash_flow_q, fn_gross_profit_q, fn_capex_q, fn_total_debt_q,
+  fn_working_capital_q, fn_rnd_expense_q, fn_interest_expense_q, fn_cash_and_equiv_q
 
-PRE-COMPUTED ANOMALIES (model77 — ready to use):
-  earnings_momentum_composite_score, earnings_momentum_analyst_score,
-  five_year_eps_stability, forward_ebitda_to_enterprise_value_2,
-  forward_cash_flow_to_price, cash_burn_rate, fcf_yield_times_forward_roe,
-  sustainable_growth_rate, normalized_earnings_yield,
-  gross_profit_to_assets_ratio, asset_growth_rate, industry_relative_return_5d,
-  gross_profit_margin_ttm_2
+★ FRESH DERIVATIVE SCORES (ready to use, very untapped):
+  fscore_total, fscore_value, fscore_growth, fscore_momentum, fscore_profitability,
+  fscore_quality, fscore_surface, fscore_surface_accel,
+  fscore_bfl_total, fscore_bfl_value, fscore_bfl_growth, fscore_bfl_momentum,
+  analyst_revision_rank_derivative, composite_factor_score_derivative,
+  growth_potential_rank_derivative, multi_factor_acceleration_score_derivative
 
-ANALYST ESTIMATES: est_eps, est_ptp, est_fcf, est_cashflow_op, est_capex
+★ FRESH ANALYST ESTIMATES:
+  est_revenue, est_ebitda, est_ptp, est_net_income, est_dividend,
+  est_bvps, est_roe, est_capex, est_cashflow_op
 
-RESEARCH SENTIMENT (daily):
-  snt1_d1_earningssurprise, snt1_d1_netearningsrevision, snt1_d1_dynamicfocusrank,
-  snt1_d1_buyrecpercent, snt1_d1_sellrecpercent, consensus_analyst_rating
+★ FRESH OPTIONS (almost nobody uses these — wrap in ts_backfill):
+  call_breakeven_30, call_breakeven_60, call_breakeven_120, call_breakeven_360,
+  put_breakeven_30, put_breakeven_60, put_breakeven_120, put_breakeven_360,
+  forward_price_30, forward_price_60, forward_price_120, forward_price_360,
+  option_breakeven_30, option_breakeven_60, option_breakeven_120, option_breakeven_360
 
-SOCIAL MEDIA: scl12_buzz, scl12_sentiment, snt_social_value
+★ FRESH HIST VOL (use the non-saturated windows):
+  historical_volatility_10, historical_volatility_30, historical_volatility_90,
+  historical_volatility_120, historical_volatility_150, historical_volatility_180,
+  implied_volatility_mean_10, implied_volatility_mean_20, implied_volatility_mean_90,
+  implied_volatility_mean_120, implied_volatility_mean_180, implied_volatility_mean_360
 
-OPTIONS (sparse — ALWAYS use ts_backfill):
-  implied_volatility_call_{30,60,120,180}, implied_volatility_put_{30,60,120,180},
-  implied_volatility_mean_skew_{30,60,120}, parkinson_volatility_{60,120}
-  pcr_oi_{30,60,180,270}, pcr_vol_{30,60,180,270}
+★ FRESH RISK/BETA:
+  beta_last_30_days_spy, beta_last_90_days_spy, beta_last_180_days_spy, beta_last_360_days_spy,
+  correlation_last_30_days_spy, correlation_last_90_days_spy,
+  unsystematic_risk_last_60_days, unsystematic_risk_last_90_days,
+  systematic_risk_last_60_days, systematic_risk_last_90_days
 
-RAVENPACK NEWS (sparse — ALWAYS use ts_backfill):
-  rp_ess_earnings, rp_ess_revenue, rp_css_earnings,
-  news_pct_1min, news_max_up_ret, news_max_dn_ret
+★ FRESH SUPPLY CHAIN:
+  pv13_com_page_rank, pv13_custretsig_retsig, pv13_5l_scibr, pv13_6l_scibr
 
-SUPPLY CHAIN: rel_ret_cust, rel_ret_comp, rel_num_cust, rel_num_comp
+★ FRESH SOCIAL SENTIMENT: scl12_buzz, scl12_sentiment, snt_buzz, snt_value, snt_buzz_ret
 
-RISK: beta_last_60_days_spy, unsystematic_risk_last_60_days, systematic_risk_last_60_days
-  (NOTE: always use the full field name with window suffix — bare "unsystematic_risk" is INVALID)
+★ FRESH RAVENPACK (event data — wrap in ts_decay_linear, NOT rank directly):
+  rp_css_earnings, rp_css_credit, rp_css_insider, rp_css_business,
+  rp_ess_earnings, rp_ess_insider, rp_ess_credit,
+  rp_nip_earnings, rp_nip_credit, rp_nip_mna
 
-VECTOR DATASETS (use vec_avg or vec_sum ONLY):
-  scl12_alltype_buzzvec, scl12_alltype_sentvec, nws12_afterhsz_sl
-
-HISTORICAL VOLATILITY (NEW — completely untapped):
-  historical_volatility_10, historical_volatility_20, historical_volatility_60, historical_volatility_90
-
-OPTIONS ANALYTICS (NEW — breakeven/forward price, almost nobody uses these):
-  call_breakeven_30, call_breakeven_60, call_breakeven_120
-  forward_price_30, forward_price_60, forward_price_120
-  put_breakeven_30, put_breakeven_60
-
-DEEP ANALYST SENTIMENT (NEW — mostly untapped):
-  snt1_d1_earningstorpedo, snt1_d1_uptargetpercent, snt1_d1_downtargetpercent,
-  snt1_d1_analystcoverage, snt1_d1_longtermepsgrowthest, snt1_d1_stockrank,
-  snt1_d1_earningsrevision, snt1_d1_fundamentalfocusrank
+★ FRESH NEWS REACTION: news_mins_1_chg, news_mins_10_chg, news_mins_20_chg,
+  news_mins_1_pct_up, news_mins_1_pct_dn, news_curr_vol, news_close_vol
 
 ═══════════════════════════════════════════════════
 PATTERNS THAT ACTUALLY PASS (Sharpe > 1.25, Fitness > 1.0)
