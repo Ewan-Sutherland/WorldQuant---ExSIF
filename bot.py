@@ -72,6 +72,10 @@ class AlphaBot:
         # v6.0: Track recently simulated LLM expressions to prevent duplicates
         self.llm_simulated_expressions: set[str] = set()
         self.similarity_engine = SimilarityEngine()
+        # v7.2: Queue for rate-limited submissions — retry next tick instead of losing them
+        self._rate_limited_queue: list[tuple] = []  # [(candidate, run), ...]
+        # v7.2: Rate limit cooldown — prevent fill loop from spinning after 429
+        self._rate_limit_until: float = 0.0  # timestamp until which we skip submissions
 
         # v6.0: Optuna-based settings optimizer for near-passers
         if _HAS_OPTUNA:
@@ -422,6 +426,7 @@ class AlphaBot:
                 continue
 
             self.scheduler.remove(sim_id)
+            self._rate_limit_until = 0.0  # v7.2: clear cooldown — slot freed
 
             if status == "completed":
                 self._handle_completed(run_id, result)
@@ -1076,90 +1081,126 @@ class AlphaBot:
                 )
                 pending_variants.append((desc, variant_settings))
 
-            # Submit in parallel batches of 3 (WQ concurrent sim limit)
+            # Drain in-flight sims first so we have full concurrent capacity
             import time as _time
-            batch_size = 3
-            for batch_start in range(0, len(pending_variants), batch_size):
-                batch = pending_variants[batch_start:batch_start + batch_size]
-                
-                # Submit all in batch
-                batch_sims = []
-                for desc, vsettings in batch:
+            if self.scheduler.running:
+                print(f"  [OPTIMIZE] Draining {len(self.scheduler.running)} in-flight sims before variant testing...")
+                drain_deadline = _time.time() + 3 * 60
+                while self.scheduler.running and _time.time() < drain_deadline:
+                    self._poll_running()
+                    if self.scheduler.running:
+                        _time.sleep(5)
+
+            # Submit sequentially with retry on 429 (WQ concurrent limit = 2-3)
+            # Poll completions during backoff so concurrent slots free up
+            batch_sims = []
+            for vi, (desc, vsettings) in enumerate(pending_variants):
+                # Wait between submissions so earlier sims complete & free concurrent slots
+                if vi > 0:
+                    for _wait in range(3):
+                        self._poll_running()
+                        for _bd, _bvs, _bsid in batch_sims:
+                            try:
+                                self.client.poll_simulation(_bsid)
+                            except Exception:
+                                pass
+                        _time.sleep(5)
+                submitted = False
+                last_exc = None
+                for retry in range(6):  # up to 6 retries
                     try:
                         sim_id_v = self.client.submit_simulation(expression, vsettings)
                         batch_sims.append((desc, vsettings, sim_id_v))
                         print(f"  [Variant] {desc} — submitted")
+                        submitted = True
+                        break
                     except Exception as exc:
-                        print(f"  [Variant] {desc} — submit failed: {exc}")
+                        last_exc = exc
+                        if "429" in str(exc) or "CONCURRENT" in str(exc).upper():
+                            # Poll completions to free up concurrent slots
+                            for _poll in range(3):
+                                self._poll_running()
+                                for _bd, _bvs, _bsid in batch_sims:
+                                    try:
+                                        self.client.poll_simulation(_bsid)
+                                    except Exception:
+                                        pass
+                                _time.sleep(8)
+                        else:
+                            print(f"  [Variant] {desc} — submit failed: {exc}")
+                            break
+                if not submitted:
+                    print(f"  [Variant] {desc} — skipped (concurrent limit)")
+            pending_variants = []  # clear, now tracked in batch_sims
 
-                # Poll all in batch until done
-                batch_results = {}
-                deadline = _time.time() + 5 * 60  # 5 min timeout
-                while len(batch_results) < len(batch_sims) and _time.time() < deadline:
-                    for desc, vsettings, sid in batch_sims:
-                        if sid in batch_results:
-                            continue
-                        try:
-                            result_v = self.client.poll_simulation(sid)
-                            if result_v["status"] in ("completed", "failed", "timed_out"):
-                                batch_results[sid] = (desc, vsettings, result_v)
-                        except Exception:
-                            pass
-                    if len(batch_results) < len(batch_sims):
-                        _time.sleep(8)
-
-                # Process batch results
+            # Poll all submitted variants until done
+            batch_results = {}
+            deadline = _time.time() + 5 * 60  # 5 min timeout
+            while len(batch_results) < len(batch_sims) and _time.time() < deadline:
                 for desc, vsettings, sid in batch_sims:
-                    if sid not in batch_results:
-                        print(f"    ⚠️ {desc} — timed out")
+                    if sid in batch_results:
                         continue
-                    _, _, variant_result = batch_results[sid]
-
-                    if variant_result["status"] != "completed":
-                        print(f"    ⚠️ {desc} — status: {variant_result['status']}")
-                        continue
-
-                    v_metrics = parse_metrics(f"opt_{generated}", variant_result)
-                    if not v_metrics.submit_eligible:
-                        print(
-                            f"    ⚠️ Not eligible: S={v_metrics.sharpe:.2f} F={v_metrics.fitness:.2f} "
-                            f"({v_metrics.fail_reason})"
-                        )
-                        continue
-
-                    v_alpha_id = self._extract_alpha_id(variant_result)
-                    if not v_alpha_id:
-                        print(f"    ⚠️ No alpha_id in result")
-                        continue
-
-                    print(
-                        f"    ✅ Eligible: S={v_metrics.sharpe:.2f} F={v_metrics.fitness:.2f} "
-                        f"T={v_metrics.turnover:.3f}"
-                    )
-
-                    # Check self-correlation for variant
                     try:
-                        v_check = self.client.check_alpha(v_alpha_id)
-                    except Exception as exc:
-                        print(f"    ⚠️ Self-corr check timed out: {exc}")
-                        continue
-                    if v_check["_passed"] is not True:
-                        print(f"    ❌ Self-corr failed (corr={v_check['_self_correlation']})")
-                        continue
+                        result_v = self.client.poll_simulation(sid)
+                        if result_v["status"] in ("completed", "failed", "timed_out"):
+                            batch_results[sid] = (desc, vsettings, result_v)
+                    except Exception:
+                        pass
+                if len(batch_results) < len(batch_sims):
+                    _time.sleep(8)
 
-                    print(f"    ✅ Self-corr passed (corr={v_check['_self_correlation']})")
+            # Process batch results
+            for desc, vsettings, sid in batch_sims:
+                if sid not in batch_results:
+                    print(f"    ⚠️ {desc} — timed out")
+                    continue
+                _, _, variant_result = batch_results[sid]
 
-                    variants.append({
-                        "alpha_id": v_alpha_id,
-                        "change": None,
-                        "sharpe": v_metrics.sharpe,
-                        "fitness": v_metrics.fitness,
-                        "desc": desc,
-                        "candidate_id": candidate_id,
-                        "run_id": run_id,
-                        "settings_json": _json.dumps(vsettings),
-                    })
-                    generated += 1
+                if variant_result["status"] != "completed":
+                    print(f"    ⚠️ {desc} — status: {variant_result['status']}")
+                    continue
+
+                v_metrics = parse_metrics(f"opt_{generated}", variant_result)
+                if not v_metrics.submit_eligible:
+                    print(
+                        f"    ⚠️ Not eligible: S={v_metrics.sharpe:.2f} F={v_metrics.fitness:.2f} "
+                        f"({v_metrics.fail_reason})"
+                    )
+                    continue
+
+                v_alpha_id = self._extract_alpha_id(variant_result)
+                if not v_alpha_id:
+                    print(f"    ⚠️ No alpha_id in result")
+                    continue
+
+                print(
+                    f"    ✅ Eligible: S={v_metrics.sharpe:.2f} F={v_metrics.fitness:.2f} "
+                    f"T={v_metrics.turnover:.3f}"
+                )
+
+                # Check self-correlation for variant
+                try:
+                    v_check = self.client.check_alpha(v_alpha_id)
+                except Exception as exc:
+                    print(f"    ⚠️ Self-corr check timed out: {exc}")
+                    continue
+                if v_check["_passed"] is not True:
+                    print(f"    ❌ Self-corr failed (corr={v_check['_self_correlation']})")
+                    continue
+
+                print(f"    ✅ Self-corr passed (corr={v_check['_self_correlation']})")
+
+                variants.append({
+                    "alpha_id": v_alpha_id,
+                    "change": None,
+                    "sharpe": v_metrics.sharpe,
+                    "fitness": v_metrics.fitness,
+                    "desc": desc,
+                    "candidate_id": candidate_id,
+                    "run_id": run_id,
+                    "settings_json": _json.dumps(vsettings),
+                })
+                generated += 1
 
         # ── Step 3: Check before-after for ALL viable variants ──
         # v7.0: Retry up to 3 times per variant — timeouts are common on WQ API
@@ -2468,8 +2509,38 @@ class AlphaBot:
     # =========================================================
 
     def _fill_capacity(self) -> None:
+        import time as _time
+        # v7.2: Skip if in rate-limit cooldown (cleared when a completion frees a slot)
+        if _time.time() < self._rate_limit_until:
+            return
+
         attempts = 0
         max_attempts = 12
+
+        # v7.2: Retry rate-limited submissions from previous ticks
+        retry_queue = list(self._rate_limited_queue)
+        self._rate_limited_queue.clear()
+        for candidate, run in retry_queue:
+            if not self.scheduler.has_capacity():
+                self._rate_limited_queue.append((candidate, run))
+                continue
+            try:
+                sim_id = self.client.submit_simulation(
+                    candidate.expression, candidate.settings.to_dict(),
+                )
+                self.storage.update_run(
+                    run.run_id, sim_id=sim_id, status="submitted",
+                    submitted_at=utc_now(), error_message=None,
+                )
+                self.scheduler.add(sim_id, run.run_id)
+                print(
+                    f"[SIM_RETRY_OK] run_id={run.run_id} sim_id={sim_id} "
+                    f"template={candidate.template_id} family={candidate.family}"
+                )
+            except Exception:
+                # Still rate limited — re-queue
+                self._rate_limited_queue.append((candidate, run))
+                break
 
         # v6.2.1: Universe sweeps — max 1 per tick to leave capacity for exploration
         sweep_submitted = 0
@@ -2512,6 +2583,7 @@ class AlphaBot:
                 )
                 self.scheduler.add(sim_id, run.run_id)
                 sweep_submitted += 1
+                self.universe_sweeper.count_sweep()
                 print(
                     f"[SWEEP_SUBMITTED] run_id={run.run_id} universe={sweep['settings']['universe']} "
                     f"neut={sweep['settings']['neutralization']} decay={sweep['settings']['decay']} "
@@ -2575,6 +2647,29 @@ class AlphaBot:
                         f"core='{core[:60]}' — 1 already submitted, allowing variant"
                     )
 
+            # v7.2: Pre-submission field validation — catch snt1_d1_ on team, LLM hallucinations, etc.
+            from datasets import expression_uses_valid_fields, get_all_valid_fields
+            if not expression_uses_valid_fields(candidate.expression):
+                # Extract which fields are missing for the log
+                _valid = {f.lower() for f in get_all_valid_fields()}
+                _tokens = set(re.findall(r'[a-z][a-z0-9_]+', candidate.expression.lower()))
+                _ops = {'rank','group_rank','ts_mean','ts_std_dev','ts_zscore','ts_rank','ts_delta',
+                        'ts_decay_linear','ts_corr','ts_sum','ts_backfill','ts_regression','ts_step',
+                        'ts_delay','ts_scale','ts_arg_min','ts_arg_max','ts_covariance','ts_product',
+                        'ts_count_nans','ts_quantile','ts_av_diff','trade_when','if_else','abs','log',
+                        'sign','max','min','power','sqrt','is_nan','bucket','densify','winsorize',
+                        'normalize','group_neutralize','group_zscore','group_scale','group_backfill',
+                        'group_mean','scale','quantile','zscore','vec_avg','vec_sum','signed_power',
+                        'inverse','reverse','hump','kth_element','range','true','false','rettype',
+                        'industry','subindustry','sector','market','exchange','not','and','or',
+                        'days_from_last_change','last_diff_value','lag','std'}
+                _missing = [t for t in _tokens - _ops if t not in _valid and len(t) > 3]
+                print(
+                    f"[FIELD_BLOCK] template={candidate.template_id} family={candidate.family} "
+                    f"missing={_missing[:3]} — skipping"
+                )
+                continue
+
             # v6.2.1: Pre-sim operator count — must match WQ's counting method
             # WQ counts: function calls + arithmetic (+,-,*,/) + comparisons (>,<,>=,<=,!=,==)
             _expr = candidate.expression
@@ -2621,15 +2716,16 @@ class AlphaBot:
                 )
 
             except BrainAPIError as exc:
-                # v5.5: Stop hammering API on rate limit / concurrent limit
+                # v7.2: On rate limit, queue for retry and cooldown to prevent spin loop
                 if "429" in str(exc) or "CONCURRENT" in str(exc).upper():
                     self.storage.update_run(
                         run.run_id,
-                        status="failed",
-                        completed_at=utc_now(),
-                        error_message=str(exc),
+                        status="pending",
+                        error_message=f"rate_limited:{str(exc)[:100]}",
                     )
-                    print(f"[SIM_RATE_LIMITED] run_id={run.run_id} — stopping fill loop")
+                    self._rate_limited_queue.append((candidate, run))
+                    self._rate_limit_until = _time.time() + 30  # 30s cooldown
+                    print(f"[SIM_RATE_LIMITED] run_id={run.run_id} — queued for retry, cooling down 30s")
                     break
 
                 self.storage.update_run(

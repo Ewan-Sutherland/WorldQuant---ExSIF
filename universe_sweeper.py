@@ -77,16 +77,19 @@ class SweepJob:
 class UniverseSweeper:
     """Manages universe sweep queue for eligible alphas."""
 
-    # v7.1: Sweep budget — prevent burning hundreds of sims on re-sweeps after restart
-    SWEEP_BUDGET_PER_SESSION = 50
+    # v7.2: Sweep budget — 50 per window, resets every 6 hours for overnight runs
+    SWEEP_BUDGET_PER_WINDOW = 50
+    SWEEP_WINDOW_SECONDS = 6 * 3600  # 6 hours
 
     def __init__(self, storage, client):
+        import time
         self.storage = storage
         self.client = client
         self._queue: list[SweepJob] = []
         self._swept: set[str] = set()  # "expr_key:universe:neut:decay" → already done
         self._max_queue = 500
         self._sweep_count = 0
+        self._sweep_window_start = time.time()
 
     def _make_key(self, expr: str, universe: str, neut: str, decay: int) -> str:
         # v7.1: Use hash for compact storage — prevents Supabase JSON truncation
@@ -205,15 +208,20 @@ class UniverseSweeper:
         if not self._queue:
             return None
 
-        # v7.1: Sweep budget — after N sweeps, stop and let exploration happen
-        if self._sweep_count >= self.SWEEP_BUDGET_PER_SESSION:
-            if self._sweep_count == self.SWEEP_BUDGET_PER_SESSION:
-                print(f"[SWEEP_BUDGET] {self._sweep_count} sweeps done — pausing sweeps, {len(self._queue)} remaining in queue")
+        # v7.2: Sweep budget — reset every 6 hours for overnight runs
+        import time
+        if time.time() - self._sweep_window_start >= self.SWEEP_WINDOW_SECONDS:
+            self._sweep_count = 0
+            self._sweep_window_start = time.time()
+            print(f"[SWEEP_RESET] Budget reset — {len(self._queue)} sweeps in queue")
+
+        if self._sweep_count >= self.SWEEP_BUDGET_PER_WINDOW:
+            if self._sweep_count == self.SWEEP_BUDGET_PER_WINDOW:
+                print(f"[SWEEP_BUDGET] {self._sweep_count} sweeps done — pausing sweeps until next window, {len(self._queue)} remaining in queue")
                 self._sweep_count += 1  # prevent repeat message
             return None
 
         job = self._queue.pop(0)
-        self._sweep_count += 1
 
         return {
             "expression": job.expression,
@@ -223,6 +231,10 @@ class UniverseSweeper:
             "is_sweep": True,
             "source_alpha_id": job.source_alpha_id,
         }
+
+    def count_sweep(self) -> None:
+        """Increment sweep count — call only when a sweep is actually submitted."""
+        self._sweep_count += 1
 
     @property
     def pending(self) -> int:

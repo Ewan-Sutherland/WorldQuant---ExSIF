@@ -569,16 +569,16 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
     # NOTE: nws18 are EVENT inputs — ts_backfill and ts_sum both fail on events.
     # Use raw field access (platform auto-aggregates events) or vec operators.
     "news_event_signal": [
-        {"template_id": "ne_01", "expression": "rank({news_event_field})"},
-        {"template_id": "ne_02", "expression": "-rank({news_event_field})"},
-        {"template_id": "ne_03", "expression": "rank(ts_zscore({news_event_field}, {n}))"},
-        {"template_id": "ne_04", "expression": "rank(ts_delta({news_event_field}, {n}))"},
-        {"template_id": "ne_05", "expression": "ts_decay_linear(rank({news_event_field}), {n})"},
-        {"template_id": "ne_06", "expression": "group_rank({news_event_field}, industry)"},
-        {"template_id": "ne_07", "expression": "rank({news_event_field}) * rank(-returns)"},
-        {"template_id": "ne_08", "expression": "rank({news_event_field}) * rank(adv20)"},
-        {"template_id": "ne_09", "expression": "rank({news_event_field} * -ts_zscore(returns, {n}))"},
-        {"template_id": "ne_10", "expression": "trade_when({news_event_field} > 0, rank(-returns), -1)"},
+        {"template_id": "ne_01", "expression": "rank(vec_avg({news_event_field}))"},
+        {"template_id": "ne_02", "expression": "-rank(vec_avg({news_event_field}))"},
+        {"template_id": "ne_03", "expression": "rank(ts_zscore(vec_avg({news_event_field}), {n}))"},
+        {"template_id": "ne_04", "expression": "rank(ts_delta(vec_avg({news_event_field}), {n}))"},
+        {"template_id": "ne_05", "expression": "ts_decay_linear(rank(vec_avg({news_event_field})), {n})"},
+        {"template_id": "ne_06", "expression": "group_rank(vec_avg({news_event_field}), industry)"},
+        {"template_id": "ne_07", "expression": "rank(vec_avg({news_event_field})) * rank(-returns)"},
+        {"template_id": "ne_08", "expression": "rank(vec_avg({news_event_field})) * rank(adv20)"},
+        {"template_id": "ne_09", "expression": "rank(vec_avg({news_event_field}) * -ts_zscore(returns, {n}))"},
+        {"template_id": "ne_10", "expression": "trade_when(not(is_nan(vec_avg({news_event_field}))), rank(-returns), -1)"},
     ],
 
     # Underused RavenPack categories — ~50 fields the LLM never generates
@@ -610,11 +610,11 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
     # Cross-dimension: model77 × event/options — structural combinations too complex for combiner
     "cross_dimension": [
         {"template_id": "xd_01", "expression": "rank({model77_field}) * rank(ts_backfill({rp_field}, 60))"},
-        {"template_id": "xd_02", "expression": "rank({model77_field}) * rank({news_event_field})"},
+        {"template_id": "xd_02", "expression": "rank({model77_field}) * rank(vec_avg({news_event_field}))"},
         {"template_id": "xd_03", "expression": "rank({model77_field}) * rank({derivative_field})"},
         {"template_id": "xd_04", "expression": "rank(ts_backfill({rp_field}, 60)) * rank({derivative_field})"},
         {"template_id": "xd_05", "expression": "rank(ts_backfill({rp_field}, 60)) * rank(ts_backfill(implied_volatility_call_120, 60) - ts_backfill(implied_volatility_put_120, 60))"},
-        {"template_id": "xd_06", "expression": "rank({news_event_field}) * rank({derivative_field}) * rank(adv20)"},
+        {"template_id": "xd_06", "expression": "rank(vec_avg({news_event_field})) * rank({derivative_field}) * rank(adv20)"},
         {"template_id": "xd_07", "expression": "group_rank({model77_field}, industry) * rank(ts_backfill({rp_field}, 60))"},
         {"template_id": "xd_08", "expression": "rank({model77_field} * ts_backfill({rp_field}, 60)) + rank(-ts_mean(returns, {m}))"},
     ],
@@ -680,7 +680,7 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "ra_01", "expression": "trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.55, -ts_regression(returns, ts_delay(returns, 1), 120, lag=0, rettype=2), -1)"},
         {"template_id": "ra_02", "expression": "-rank(ts_regression({fresh_est_field}, ts_delay({fresh_est_field}, 20), 120, lag=0, rettype=2))"},
         {"template_id": "ra_03", "expression": "-rank(ts_regression(returns, ts_delay(rank({fresh_fund_field} / cap), 1), 60, lag=0, rettype=2))"},
-        {"template_id": "ra_04", "expression": "rank(ts_regression({fresh_fund_field} / cap, ts_step(1), 252, 0, 1))"},
+        {"template_id": "ra_04", "expression": "rank(ts_regression({fresh_fund_field} / cap, ts_step(1), 252, lag=0, rettype=1))"},
     ],
 
     # ── Accruals & earnings quality (academic anomalies) ──

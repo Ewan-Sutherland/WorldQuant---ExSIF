@@ -187,6 +187,12 @@ def get_all_field_names() -> dict[str, list[str]]:
     return result
 
 
+# v7.2: nws18_ fields are completely unusable (reject ALL operators including days_from_last_change)
+BLOCKED_EVENT_FIELDS_PREFIX = ('nws18_',)
+
+def is_blocked_event_field(field: str) -> bool:
+    return any(field.lower().startswith(p) for p in BLOCKED_EVENT_FIELDS_PREFIX)
+
 @lru_cache(maxsize=1)
 def get_all_valid_fields() -> set[str]:
     """Flat set of every known field name — used for LLM expression validation."""
@@ -222,10 +228,14 @@ def expression_uses_valid_fields(expr: str) -> bool:
             'vec_avg', 'vec_sum', 'signed_power', 'inverse', 'reverse', 'hump',
             'kth_element', 'range', 'true', 'false', 'rettype',
             'industry', 'subindustry', 'sector', 'market', 'exchange',
+            'days_from_last_change', 'last_diff_value', 'lag', 'std',
+            'not', 'and', 'or',
         }
         field_tokens = tokens - operators
         valid_lower = {f.lower() for f in valid}
         missing = [t for t in field_tokens if t not in valid_lower and len(t) > 3]
+        # v7.2: nws18_ event fields only work inside vec_avg() wrapper
+        # Don't block them here — the templates handle wrapping correctly
         return len(missing) == 0
     except Exception:
         return True  # If check fails, allow it
@@ -402,14 +412,14 @@ def get_fresh_fundamental_fields() -> list[str]:
     """Fundamental fields NOT in any existing submission — guaranteed decorrelated."""
     names = get_all_field_names()
     fund = names.get("fundamental", [])
-    return [f for f in fund if f.lower() not in _SATURATED_FIELDS and len(f) > 3]
+    return [f for f in fund if f.lower() not in _SATURATED_FIELDS and len(f) > 3 and "event" not in f.lower()]
 
 
 def get_fresh_fn_fields() -> list[str]:
     """fn_financial fields NOT in submissions (317 of 318 are fresh)."""
     names = get_all_field_names()
     fn = names.get("fn_financial", [])
-    return [f for f in fn if f.lower() not in _SATURATED_FIELDS]
+    return [f for f in fn if f.lower() not in _SATURATED_FIELDS and "event" not in f.lower()]
 
 
 def get_fresh_estimate_fields() -> list[str]:
