@@ -522,11 +522,18 @@ class AlphaGenerator:
                            "mr_short_term", "mr_vol_gated", "mr_regression_residual",
                            "mr_volume_conditioned", "mr_long_term",
                            "tech_rsi_like", "tech_bollinger_like", "tech_macd_like",
-                           "tech_breakout", "tech_trend_strength"},
+                           "tech_breakout", "tech_trend_strength",
+                           "compound_momentum"},
         "fundamental": {"fundamental_value", "quality_trend", "size_value", "simple_ratio",
                        "expanded_fundamental", "fundamental_vol", "fn_financial", "fundamental",
                        "fscore", "accruals_quality",
                        "fresh_fundamental", "fn_quarterly", "earnings_quality",
+                       # v7.3: Pure data families — highest priority for decorrelation
+                       "pure_fundamental", "pure_fundamental_ts", "pure_fn",
+                       "pure_deriv_scores", "pure_fund_analyst",
+                       # v7.3: Operator diversity families
+                       "alt_normalization", "low_turnover", "data_quality",
+                       "group_fill_scale", "regime_change",
                        # Research: value, profitability, quality, investment
                        "value_book", "value_earnings_yield", "value_cashflow_yield", "value_dividend",
                        "profit_gross", "profit_margins", "profit_return_on_capital", "profit_cash_return_quarterly",
@@ -539,6 +546,8 @@ class AlphaGenerator:
         "analyst_sentiment": {"earnings_momentum", "analyst_estimates", "analyst_sentiment",
                              "analyst_deep", "fundamental_scores",
                              "fresh_estimates",
+                             # v7.3: Pure analyst family
+                             "pure_analyst",
                              # Research: momentum, earnings, analyst
                              "momentum_price", "momentum_earnings", "momentum_estimate_revision", "momentum_industry",
                              "earnings_sue_pead", "earnings_quality_quarterly", "earnings_surprise_magnitude", "earnings_torpedo",
@@ -917,33 +926,80 @@ class AlphaGenerator:
             smoothing_prob = getattr(config, "FRESH_FORCE_SMOOTH_PROB", 0.72)
 
         already_smoothed = expr.startswith("ts_mean(") or expr.startswith("ts_decay_linear(")
+        already_ranked = expr.startswith("rank(") or expr.startswith("group_rank(") or expr.startswith("group_zscore(")
+        already_normed = already_ranked or expr.startswith("quantile(") or expr.startswith("normalize(") or expr.startswith("scale(")
         if self.rng.random() < smoothing_prob and not already_smoothed:
+            # v7.3: Use different normalization methods for PnL diversity
+            # rank() vs quantile() vs normalize() produce different PnL profiles
+            # from the same signal — free decorrelation axis
+            if already_normed:
+                inner = expr
+            else:
+                norm_roll = self.rng.random()
+                if norm_roll < 0.55:
+                    inner = f"rank({expr})"
+                elif norm_roll < 0.75:
+                    inner = f"quantile({expr})"  # Gaussian transform — different PnL shape
+                elif norm_roll < 0.88:
+                    inner = f"normalize({expr})"  # Mean-subtract — preserves distribution shape
+                else:
+                    inner = f"scale({expr})"  # Scale to booksize — preserves magnitude
+
             if force_smoothing:
                 win = self.rng.choice([5, 8, 10, 10])
                 if self.rng.random() < 0.55:
-                    expr = f"ts_decay_linear(rank({expr}), {win})"
+                    expr = f"ts_decay_linear({inner}, {win})"
                 else:
-                    expr = f"ts_mean(rank({expr}), {win})"
+                    expr = f"ts_mean({inner}, {win})"
             else:
                 win = self.rng.choice(smooth_windows)
                 roll = self.rng.random()
                 if roll < decay_prob:
-                    expr = f"ts_decay_linear(rank({expr}), {win})"
+                    expr = f"ts_decay_linear({inner}, {win})"
                 elif roll < decay_prob + 0.08:
-                    # v6.1: rank(rank(X)) — double ranking, normalizes extreme distributions
-                    # Shows up in several near-passers from logs
-                    expr = f"rank(rank({expr}))"
-                elif roll < decay_prob + 0.13:
-                    # v6.1: winsorize — cap outliers, improves fitness (used in wp_04, our best proven template)
-                    expr = f"winsorize(rank({expr}), std=4)"
+                    # v7.3: winsorize — cap outliers
+                    expr = f"winsorize({inner}, std=4)"
+                elif roll < decay_prob + 0.14:
+                    # v7.3: hump — reduce turnover, directly boosts fitness
+                    expr = f"hump({inner}, hump=0.01)"
                 else:
-                    expr = f"ts_mean(rank({expr}), {win})"
+                    expr = f"ts_mean({inner}, {win})"
 
         rank_prob = getattr(config, "FRESH_RAW_RANK_PROB", 0.02) if not light else 0.05
         if self.rng.random() < rank_prob and not expr.startswith("rank("):
             expr = f"rank({expr})"
 
+        # v7.3: Fix common bad patterns
+        expr = self._fix_rank_group(expr)
+
         return expr
+
+    @staticmethod
+    def _fix_rank_group(expr: str) -> str:
+        """Fix rank(x, industry) → group_rank(x, industry) using balanced paren matching."""
+        result = []
+        i = 0
+        while i < len(expr):
+            if expr[i:i+5] == 'rank(' and (i == 0 or not expr[i-1].isalpha()):
+                depth = 1
+                j = i + 5
+                while j < len(expr) and depth > 0:
+                    if expr[j] == '(': depth += 1
+                    elif expr[j] == ')': depth -= 1
+                    j += 1
+                inner = expr[i+5:j-1]
+                for grp in ['industry', 'subindustry', 'sector', 'market']:
+                    if inner.rstrip().endswith(f', {grp}'):
+                        result.append('group_rank(' + inner + ')')
+                        i = j
+                        break
+                else:
+                    result.append(expr[i])
+                    i += 1
+            else:
+                result.append(expr[i])
+                i += 1
+        return ''.join(result)
 
     # ============================
     # PARAMS

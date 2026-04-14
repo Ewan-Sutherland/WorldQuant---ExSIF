@@ -780,6 +780,9 @@ def validate_expression(expr: str) -> tuple[bool, str]:
     """
     expr = expr.strip()
 
+    # v7.2: Replace scientific notation (WQ doesn't support 1e-6 etc)
+    expr = re.sub(r'\d+(?:\.\d+)?[eE][-+]?\d+', lambda m: f"{float(m.group(0)):.10f}".rstrip('0').rstrip('.'), expr)
+
     if not expr:
         return False, "empty"
 

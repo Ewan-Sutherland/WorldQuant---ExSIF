@@ -293,25 +293,45 @@ class AlphaBot:
         self._maybe_run_submit_pipeline()  # v7.0: scheduled auto-submission
         self._fill_capacity()
 
+        # v7.2: Periodic tick confirmation (every 20 ticks)
+        self._tick_count = getattr(self, "_tick_count", 0) + 1
+        if self._tick_count % 20 == 0:
+            from datetime import datetime, timezone
+            print(f"[TICK] #{self._tick_count} at {datetime.now(timezone.utc).strftime('%H:%M UTC')}")
+
     def _maybe_run_submit_pipeline(self) -> None:
         """v7.0: Run submission pipeline if it's this bot's scheduled window."""
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
 
-        # Only check once per hour (avoid re-running every tick)
-        if hasattr(self, "_last_submit_hour") and self._last_submit_hour == now.hour:
+        # Only run once per window — guard uses "hour:ran" key so we keep
+        # checking within the scheduled hour until minute threshold is met
+        submit_key = f"{now.hour}:done"
+        if hasattr(self, "_last_submit_key") and self._last_submit_key == submit_key:
             return
 
         try:
             from submit_pipeline import should_submit_now, SubmitPipeline
-            if should_submit_now(self.storage.owner):
-                self._last_submit_hour = now.hour
-                print(f"\n[SUBMIT_PIPELINE] Scheduled submission window — starting pipeline...")
-                pipeline = SubmitPipeline(self.storage, self.client, config)
-                result = pipeline.run()
-                print(f"[SUBMIT_PIPELINE] Done: {result}")
 
-                # v7.2: Check teammate scores after own pipeline
+            if should_submit_now(self.storage.owner):
+                self._last_submit_key = submit_key  # Lock out rest of this hour
+
+                # v7.2: Use coordinated pipeline if this bot participates
+                coordinated_owners = getattr(config, "COORDINATED_SUBMIT_OWNERS", [])
+                if self.storage.owner in coordinated_owners:
+                    print(f"\n[SUBMIT_PIPELINE] Coordinated submission window — starting...")
+                    from coordinated_submit import CoordinatedSubmitPipeline
+                    pipeline = CoordinatedSubmitPipeline(self.storage, self.client, config)
+                    result = pipeline.run()
+                    print(f"[SUBMIT_PIPELINE] Coordinated done: {result}")
+                else:
+                    # Non-coordinated bot (Tom/Luca) — use old pipeline
+                    print(f"\n[SUBMIT_PIPELINE] Scheduled submission window — starting pipeline...")
+                    pipeline = SubmitPipeline(self.storage, self.client, config)
+                    result = pipeline.run()
+                    print(f"[SUBMIT_PIPELINE] Done: {result}")
+
+                # v7.2: Coordinator checks teammate scores (Tom/Luca) after coordinated submission
                 if getattr(config, "CHECK_TEAMMATE_SCORES", False):
                     teammates = getattr(config, "TEAMMATE_OWNERS", [])
                     if teammates:
@@ -323,10 +343,12 @@ class AlphaBot:
                         except Exception as tm_exc:
                             print(f"[TEAMMATE_CHECK_ERROR] {tm_exc}")
             else:
-                self._last_submit_hour = now.hour
+                pass  # Not yet time — keep checking each tick until minute threshold
         except Exception as exc:
-            self._last_submit_hour = now.hour
+            self._last_submit_key = submit_key  # Lock out to prevent crash loop
             print(f"[SUBMIT_PIPELINE_ERROR] {exc}")
+            import traceback
+            traceback.print_exc()
 
     # =========================================================
     # v6.2.1: Stall detection + escalating recovery
@@ -942,34 +964,15 @@ class AlphaBot:
         core = self._extract_core_signal(expression)
         family = candidate_row.get("family", "")
 
-        # Skip if core already rejected — EXCEPT sweep candidates (different universe = different correlation)
+        # Skip if core already rejected by self-correlation
+        # v7.2: Sweeps also skip — same core = same correlation regardless of settings
         is_sweep = str(candidate_row.get("template_id", "")).startswith("sweep_")
-        if core and core in self.rejected_cores and not is_sweep:
+        if core and core in self.rejected_cores:
             print(
                 f"[OPTIMIZE_SKIP_CORR] run_id={run_id} "
                 f"core='{core[:60]}' — already rejected by WQ"
             )
             return
-
-        # v7.1: Correlation hurdle pre-check — if this expression's fields overlap
-        # heavily with multiple existing submissions, it's almost certainly going to
-        # fail self-correlation. Skip the expensive API check.
-        if not is_sweep and self.passed_cores:
-            expr_fields = set(self._extract_fields_from_expr(expression))
-            if expr_fields:
-                high_overlap_count = 0
-                for sub_core in self.passed_cores:
-                    sub_fields = set(self._extract_fields_from_expr(sub_core))
-                    if sub_fields and expr_fields:
-                        overlap = len(expr_fields & sub_fields) / max(len(expr_fields), 1)
-                        if overlap >= 0.8:
-                            high_overlap_count += 1
-                if high_overlap_count >= 3:
-                    print(
-                        f"[CORR_HURDLE_SKIP] run_id={run_id} — fields overlap ≥80% with "
-                        f"{high_overlap_count} existing submissions, likely self-corr fail"
-                    )
-                    return
 
         # ── Step 1: Check self-correlation ONLY (the only gate) ──
         alpha_id = self._extract_alpha_id(result)
@@ -1070,6 +1073,7 @@ class AlphaBot:
 
             # v6.2.1: Collect all variant settings first, then simulate in parallel batches of 3
             pending_variants = []
+            skipped_variants = []
             for i in range(n_variants * 3):
                 if len(pending_variants) >= n_variants:
                     break
@@ -1158,8 +1162,38 @@ class AlphaBot:
                             print(f"  [Variant] {desc} — submit failed: {exc}")
                             break
                 if not submitted:
-                    print(f"  [Variant] {desc} — skipped (concurrent limit)")
+                    print(f"  [Variant] {desc} — deferred (concurrent limit)")
+                    skipped_variants.append((desc, vsettings))
             pending_variants = []  # clear, now tracked in batch_sims
+
+            # v7.2: Retry deferred variants after some batch sims complete (frees slots)
+            if skipped_variants and batch_sims:
+                # Wait for at least 1 batch sim to complete
+                _retry_deadline = _time.time() + 60
+                while _time.time() < _retry_deadline:
+                    for _bd, _bvs, _bsid in batch_sims:
+                        try:
+                            self.client.poll_simulation(_bsid)
+                        except Exception:
+                            pass
+                    self._poll_running()
+                    _time.sleep(5)
+                    # Try submitting deferred variants
+                    still_skipped = []
+                    for desc, vsettings in skipped_variants:
+                        try:
+                            sim_id_v = self.client.submit_simulation(expression, vsettings)
+                            batch_sims.append((desc, vsettings, sim_id_v))
+                            print(f"  [Variant] {desc} — submitted (retry)")
+                        except Exception:
+                            still_skipped.append((desc, vsettings))
+                    skipped_variants = still_skipped
+                    if not skipped_variants:
+                        break
+
+                for desc, vsettings in skipped_variants:
+                    print(f"  [Variant] {desc} — skipped (concurrent limit)")
+            skipped_variants = []
 
             # Poll all submitted variants until done
             batch_results = {}
@@ -2388,6 +2422,8 @@ class AlphaBot:
                 if core and self.refinement_attempts_by_core.get(core, 0) >= max_core_refine:
                     self.storage.mark_refinement_consumed(base_candidate_id)
                     self._active_refinement_ids.discard(base_candidate_id)
+                    # v7.2: Also mark core as exhausted so pre-check catches it
+                    self.core_signal_exhausted[core] = self.core_signal_exhausted.get(core, 0) + 1
                     print(f"[CORE_REFINE_CAP] core='{core[:60]}' attempts={self.refinement_attempts_by_core[core]} — skipping")
                     continue
 

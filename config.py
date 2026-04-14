@@ -55,16 +55,16 @@ MIN_FITNESS = 1.00
 MAX_TURNOVER = 0.70
 
 # Near-passer / refinement settings
-NEAR_PASSER_MIN_SHARPE = 1.35
-NEAR_PASSER_MIN_FITNESS = 0.75
+NEAR_PASSER_MIN_SHARPE = 1.20
+NEAR_PASSER_MIN_FITNESS = 0.65
 NEAR_PASSER_MAX_TURNOVER = 0.75
 REFINEMENT_PROBABILITY = 0.40  # v7.2: explore more fresh research templates, refine less
 
-MIN_REFINEMENT_SHARPE = 1.20
-FRONTIER_MIN_SHARPE = 1.25
-FRONTIER_MIN_FITNESS = 0.65
-FRONTIER_ALT_MIN_SHARPE = 1.45
-FRONTIER_ALT_MIN_FITNESS = 0.68
+MIN_REFINEMENT_SHARPE = 0.95
+FRONTIER_MIN_SHARPE = 0.95
+FRONTIER_MIN_FITNESS = 0.50
+FRONTIER_ALT_MIN_SHARPE = 1.35
+FRONTIER_ALT_MIN_FITNESS = 0.60
 
 # Frontier templates worth exploiting more aggressively
 STRONG_TEMPLATES = set()  # v7.2: old saturated templates no longer elite
@@ -77,10 +77,10 @@ RELAXED_TEMPLATE_COUNT = 14
 RELAXED_TEMPLATE_MIN_AVG_SHARPE = 1.30
 RELAXED_TEMPLATE_MIN_AVG_FITNESS = 0.70
 DIVERSITY_EXPLORATION_PROBABILITY = 0.08  # v7.2: epoch rotation handles diversity
-MAX_REFINEMENT_ATTEMPTS_PER_BASE = 6  # v7.2: explore more, refine less
+MAX_REFINEMENT_ATTEMPTS_PER_BASE = 10  # v7.3: fundamentals need more settings sweeps
 MAX_CORE_SIGNAL_EXHAUSTIONS = 2  # v6.0: was 3 — same core through different candidates wastes sims
 MAX_FAMILY_TEMPLATE_EXHAUSTIONS = 5  # v7.2: research families have 10-14 templates
-MAX_REFINEMENT_PER_CORE = 3  # v6.2.1: was 5 — faster exhaustion, queue was growing unbounded
+MAX_REFINEMENT_PER_CORE = 6  # v7.3: diverse signals close to 1.25, need more universe/neut combos — faster exhaustion, queue was growing unbounded
 MAX_SUBMISSIONS_PER_CORE = 3  # v7.2: self-corr wall means 4 variants all correlate
 LOCAL_REFINEMENT_HISTORY = 10
 LOCAL_REFINEMENT_MAX_SIMILARITY = 0.90
@@ -110,13 +110,14 @@ AUTO_SUBMIT = False
 # The pipeline re-checks all scores, groups by core signal, submits greedily.
 # Set your schedule here or let it auto-assign based on alphabetical order.
 SUBMIT_SCHEDULE = {
-    "ewansutherland@icloud.com": [5, 17],   # 5am and 5pm UTC
-    "gmpc201@exeter.ac.uk": [6, 18],         # 6am and 6pm UTC
-    "tns203@exeter.ac.uk": [7, 19],           # 7am and 7pm UTC
-    "lucacroci2005@gmail.com": [8, 20],       # 8am and 8pm UTC
+    "ewansutherland@icloud.com": [7, 19],   # 7:30am and 7:30pm UTC (coordinated)
+    "gmpc201@exeter.ac.uk": [7, 19],         # 7:30am and 7:30pm UTC (coordinated)
+    "tns203@exeter.ac.uk": [7, 19],           # 7:30am and 7:30pm UTC
+    "lucacroci2005@gmail.com": [7, 19],       # 7:30am and 7:30pm UTC
 }
+SUBMIT_MINUTE = 30  # Fire at :30 past the hour
 # Minimum score change to auto-submit (avoids marginal alphas flipping negative)
-SUBMIT_MIN_SCORE = 3
+SUBMIT_MIN_SCORE = 20
 
 # v6.2: Number of Optuna settings variants to try per eligible alpha
 OPTIMIZE_VARIANTS = 5
@@ -531,3 +532,13 @@ TEAMMATE_OWNERS = [
     "tns203@exeter.ac.uk",
     "lucacroci2005@gmail.com",
 ]
+
+# ── Coordinated Team Submission ──────────────────────────────────
+# Which bots participate in coordinated submission (can check own scores)
+COORDINATED_SUBMIT_OWNERS = [
+    "ewansutherland@icloud.com",
+    "gmpc201@exeter.ac.uk",
+]
+# Only the coordinator ranks globally and orchestrates
+IS_COORDINATOR = True  # Ewan's config = True, team config = False
+MAX_SUBMISSIONS_PER_WINDOW = 15

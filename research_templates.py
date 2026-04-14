@@ -352,7 +352,7 @@ RESEARCH_TEMPLATES = {
         {"template_id": "min_06", "expression": "group_zscore(ts_delta(close, 60) / (ts_delay(close, 60) + 0.001), sector) * rank(volume)"},
         {"template_id": "min_07", "expression": "group_zscore(ts_mean(ts_delta(close, 20) / (ts_delay(close, 20) + 0.001), 60), industry)"},
         {"template_id": "min_08", "expression": "group_rank(ts_delta(close, 60) / (ts_delay(close, 60) + 0.001), industry) * rank(cap)"},
-        {"template_id": "mi_09", "expression": "rank(ts_corr(ts_delta(close, 60) / (ts_delay(close, 60) + 0.001), group_mean(ts_delta(close, 60) / (ts_delay(close, 60) + 0.001), industry), 120))"},
+        {"template_id": "mi_09", "expression": "rank(ts_corr(ts_delta(close, 60) / (ts_delay(close, 60) + 0.001), group_mean(ts_delta(close, 60) / (ts_delay(close, 60) + 0.001), 1, industry), 120))"},
         {"template_id": "mi_10", "expression": "group_zscore(ts_delta(close, 60) / (ts_delay(close, 60) + 0.001), sector) * rank(cap)"},
     ],
 
@@ -554,7 +554,7 @@ RESEARCH_TEMPLATES = {
         {"template_id": "lvt_04", "expression": "-rank(ts_zscore(ts_mean(volume, 5) / (ts_mean(volume, 60) + 0.001), 60))"},
         {"template_id": "lvt_05", "expression": "-group_rank(ts_corr(volume, close, 60), industry)"},
         {"template_id": "lvt_06", "expression": "-rank(ts_corr(volume, close, 60))"},
-        {"template_id": "lvt_07", "expression": "-rank(ts_delta(kth_element(volume, 3, k=20), 10))"},
+        {"template_id": "lvt_07", "expression": "-rank(ts_delta(kth_element(volume, 20, k=3), 10))"},
         {"template_id": "lvt_08", "expression": "rank(ts_delta(ts_delta(volume, 10), 10))"},
         {"template_id": "lvt_09", "expression": "-rank(ts_corr(volume, close, 60))"},
         {"template_id": "lvt_10", "expression": "rank(ts_regression(volume, close, 20))"},
@@ -572,7 +572,7 @@ RESEARCH_TEMPLATES = {
         {"template_id": "ltr_07", "expression": "-rank(ts_corr(volume / (sharesout + 0.001), abs(returns), 20))"},
         {"template_id": "ltr_08", "expression": "-rank(sqrt((volume / (sharesout + 0.001)) / (ts_mean(volume / (sharesout + 0.001), 252) + 0.001)))"},
         {"template_id": "ltr_09", "expression": "-rank(ts_corr(volume / (sharesout + 0.001), abs(returns), 20))"},
-        {"template_id": "ltr_10", "expression": "-rank(power((volume / (sharesout + 0.001)) / (ts_mean(volume / (sharesout + 0.001), 252) + 0.001), hump=0.5))"},
+        {"template_id": "ltr_10", "expression": "-rank(signed_power((volume / (sharesout + 0.001)) / (ts_mean(volume / (sharesout + 0.001), 252) + 0.001), 0.5))"},
         {"template_id": "ltr_11", "expression": "-rank(ts_quantile(volume / (sharesout + 0.001), 60))"},
         {"template_id": "ltr_12", "expression": "-group_rank(ts_delta(ts_mean(volume / (sharesout + 0.001), 5), 20), subindustry)"},
     ],
@@ -952,16 +952,16 @@ RESEARCH_TEMPLATES = {
     ],
 
     "sc_breadth": [
-        {"template_id": "scbr_01", "expression": "rank(rank(pv13_5l_scibr) / (pv13_1l_scibr + 0.001))"},
-        {"template_id": "scbr_02", "expression": "rank(rank(pv13_6l_scibr) / (pv13_2l_scibr + 0.001))"},
-        {"template_id": "scbr_03", "expression": "ts_delta(rank(pv13_3l_scibr) - rank(pv13_1l_scibr), 20)"},
-        {"template_id": "scbr_04", "expression": "group_zscore(pv13_5l_scibr, industry)"},
-        {"template_id": "scbr_05", "expression": "ts_zscore(rank(pv13_4l_scibr) / (pv13_2l_scibr + 0.001), 60)"},
-        {"template_id": "scbr_06", "expression": "ts_delta(rank(pv13_6l_scibr), 10)"},
-        {"template_id": "scbr_07", "expression": "rank(rank(ts_backfill(pv13_di_5l, 60)) - rank(ts_backfill(pv13_di_6l, 60)))"},
-        {"template_id": "scbr_08", "expression": "ts_decay_linear(rank(rank(pv13_5l_scibr) - rank(pv13_1l_scibr)), 15)"},
-        {"template_id": "scb_09", "expression": "ts_decay_linear(rank(rank(pv13_5l_scibr) - rank(pv13_1l_scibr)), 15)"},
-        {"template_id": "scb_10", "expression": "ts_zscore(rank(ts_backfill(pv13_di_6l, 60)), 40)"},
+        {"template_id": "scbr_01", "expression": "group_rank(operating_income / (cap + 0.001), densify(pv13_5l_scibr))"},
+        {"template_id": "scbr_02", "expression": "group_zscore(operating_income / (cap + 0.001), densify(pv13_5l_scibr))"},
+        {"template_id": "scbr_03", "expression": "group_rank(cashflow_op / (cap + 0.001), densify(pv13_5l_scibr))"},
+        {"template_id": "scbr_04", "expression": "group_zscore(ebitda / (cap + 0.001), densify(pv13_5l_scibr))"},
+        {"template_id": "scbr_05", "expression": "group_rank(returns, densify(pv13_5l_scibr))"},
+        {"template_id": "scbr_06", "expression": "group_neutralize(returns, densify(pv13_5l_scibr))"},
+        {"template_id": "scbr_07", "expression": "group_rank(est_eps / (cap + 0.001), densify(pv13_5l_scibr))"},
+        {"template_id": "scbr_08", "expression": "group_zscore(ts_delta(close, 20) / (close + 0.001), densify(pv13_5l_scibr))"},
+        {"template_id": "scb_09", "expression": "group_rank(free_cash_flow / (cap + 0.001), densify(pv13_6l_scibr))"},
+        {"template_id": "scb_10", "expression": "group_zscore(revenue / (cap + 0.001), densify(pv13_6l_scibr))"},
     ],
 
     "sc_customer_returns": [
@@ -985,9 +985,9 @@ RESEARCH_TEMPLATES = {
         {"template_id": "schs_05", "expression": "ts_zscore(rank(ts_backfill(pv13_com_page_rank, 60)), 60)"},
         {"template_id": "schs_06", "expression": "ts_decay_linear(rank(ts_backfill(pv13_com_page_rank, 60)), 15)"},
         {"template_id": "schs_07", "expression": "rank(ts_backfill(pv13_com_page_rank, 60)) - rank(ts_backfill(pv13_com_page_rank, 60))"},
-        {"template_id": "schs_08", "expression": "ts_delta(rank(pv13_h2_sector), 5)"},
+        {"template_id": "schs_08", "expression": "group_rank(ts_delta(close, 5), pv13_h2_sector)"},
         {"template_id": "schs_09", "expression": "rank(ts_backfill(pv13_com_page_rank, 60)) - rank(ts_backfill(pv13_com_page_rank, 60))"},
-        {"template_id": "schs_10", "expression": "ts_delta(rank(pv13_h2_sector), 5)"},
+        {"template_id": "schs_10", "expression": "group_rank(ts_delta(close, 5), pv13_h2_sector)"},
         {"template_id": "schs_11", "expression": "group_zscore(rank(ts_backfill(pv13_com_page_rank, 60)) - rank(ts_backfill(pv13_com_page_rank, 60)), sector)"},
         {"template_id": "schs_12", "expression": "ts_zscore(rank(ts_backfill(pv13_com_page_rank, 60)), 40)"},
     ],
@@ -1074,16 +1074,16 @@ RESEARCH_TEMPLATES = {
     ],
 
     "analyst_coverage_dispersion": [
-        {"template_id": "acd_01", "expression": "rank(-(anl4_ady_high - anl4_ady_low) / (anl4_ady_mean + 0.001))"},
-        {"template_id": "acd_02", "expression": "group_zscore((anl4_ady_mean - anl4_ady_median) / (anl4_ady_high - anl4_ady_low + 0.001), subindustry)"},
-        {"template_id": "acd_03", "expression": "rank(ts_delta(anl4_ady_numest, 20))"},
-        {"template_id": "acd_04", "expression": "group_zscore(-(anl4_ady_high - anl4_ady_low) / (anl4_ady_mean + 0.001), industry)"},
-        {"template_id": "acd_05", "expression": "rank(-anl4_ady_down / (anl4_ady_numest + 0.001))"},
-        {"template_id": "acd_06", "expression": "group_zscore(anl4_ady_pu / (anl4_ady_numest + 0.001), subindustry)"},
-        {"template_id": "acd_07", "expression": "rank(-ts_delta((anl4_ady_high - anl4_ady_low) / (anl4_ady_mean + 0.001), 20))"},
-        {"template_id": "acd_08", "expression": "ts_decay_linear(rank(ts_delta(anl4_ady_mean, 20)), 10)"},
-        {"template_id": "acd_09", "expression": "group_zscore(anl4_ady_pu / (anl4_ady_numest + 0.001), subindustry)"},
-        {"template_id": "acd_10", "expression": "rank(ts_delta(anl4_ady_numest, 20) - ts_delta(anl4_ady_numest, 60))"},
+        {"template_id": "acd_01", "expression": "rank(-(vec_avg(anl4_ady_high) - vec_avg(anl4_ady_low)) / (vec_avg(anl4_ady_mean) + 0.001))"},
+        {"template_id": "acd_02", "expression": "group_zscore((vec_avg(anl4_ady_mean) - vec_avg(anl4_ady_median)) / (vec_avg(anl4_ady_high) - vec_avg(anl4_ady_low) + 0.001), subindustry)"},
+        {"template_id": "acd_03", "expression": "rank(ts_delta(vec_avg(anl4_ady_numest), 20))"},
+        {"template_id": "acd_04", "expression": "group_zscore(-(vec_avg(anl4_ady_high) - vec_avg(anl4_ady_low)) / (vec_avg(anl4_ady_mean) + 0.001), industry)"},
+        {"template_id": "acd_05", "expression": "rank(-vec_avg(anl4_ady_down) / (vec_avg(anl4_ady_numest) + 0.001))"},
+        {"template_id": "acd_06", "expression": "group_zscore(vec_avg(anl4_ady_pu) / (vec_avg(anl4_ady_numest) + 0.001), subindustry)"},
+        {"template_id": "acd_07", "expression": "rank(-ts_delta((vec_avg(anl4_ady_high) - vec_avg(anl4_ady_low)) / (vec_avg(anl4_ady_mean) + 0.001), 20))"},
+        {"template_id": "acd_08", "expression": "ts_decay_linear(rank(ts_delta(vec_avg(anl4_ady_mean), 20)), 10)"},
+        {"template_id": "acd_09", "expression": "group_zscore(vec_avg(anl4_ady_pu) / (vec_avg(anl4_ady_numest) + 0.001), subindustry)"},
+        {"template_id": "acd_10", "expression": "rank(ts_delta(vec_avg(anl4_ady_numest), 20) - ts_delta(vec_avg(anl4_ady_numest), 60))"},
     ],
 
     "analyst_target_price": [
@@ -1116,7 +1116,7 @@ RESEARCH_TEMPLATES = {
         {"template_id": "ads_01", "expression": "rank(analyst_revision_rank_derivative + earnings_certainty_rank_derivative)"},
         {"template_id": "ads_02", "expression": "group_zscore(composite_factor_score_derivative, subindustry)"},
         {"template_id": "ads_03", "expression": "rank(ts_delta(multi_factor_acceleration_score_derivative, 20))"},
-        {"template_id": "ads_04", "expression": "ts_zscore(growth_potential_rank_derivative, 60)"},
+        {"template_id": "ads_04", "expression": "rank(ts_zscore(growth_potential_rank_derivative, 60))"},
         {"template_id": "ads_05", "expression": "ts_decay_linear(rank(analyst_revision_rank_derivative), 15)"},
         {"template_id": "ads_06", "expression": "group_zscore(analyst_revision_rank_derivative + earnings_certainty_rank_derivative + growth_potential_rank_derivative + relative_valuation_rank_derivative, industry)"},
         {"template_id": "ads_07", "expression": "rank(multi_factor_static_score_derivative) + rank(multi_factor_acceleration_score_derivative)"},
@@ -1147,7 +1147,7 @@ RESEARCH_TEMPLATES = {
         {"template_id": "eqq_02", "expression": "rank(ts_backfill(cashflow, 60) / (ts_backfill(ebitda, 60) + 0.001))"},
         {"template_id": "eqq_03", "expression": "rank(ts_backfill(cashflow_op, 60) / (ts_backfill(sales, 60) + 0.001))"},
         {"template_id": "eqq_04", "expression": "rank(ts_delta(ts_backfill(cashflow_op, 60) / (ts_backfill(income, 60) + 0.001), 60))"},
-        {"template_id": "eqq_05", "expression": "rank(ts_backfill(cashflow_op, 60) - ts_backfill(income, 60))"},
+        {"template_id": "eqq_05", "expression": "rank(cashflow_op - income)"},
         {"template_id": "eqq_06", "expression": "group_zscore(ts_backfill(revenue, 60) / (ts_backfill(sales, 60) + 0.001), subindustry)"},
         {"template_id": "eqq_07", "expression": "zscore(ts_backfill(cashflow, 60) / (cap + 0.001))"},
         {"template_id": "eqq_08", "expression": "rank(ts_backfill(cashflow_op, 60) / (ts_backfill(income, 60) + 0.001)) + rank(ts_backfill(cashflow, 60) / (ts_backfill(ebitda, 60) + 0.001))"},
@@ -1285,9 +1285,9 @@ RESEARCH_TEMPLATES = {
         {"template_id": "tbr_02", "expression": "rank(-ts_arg_max(close, 60))"},
         {"template_id": "tbr_03", "expression": "rank(ts_arg_min(close, 60))"},
         {"template_id": "tbr_04", "expression": "rank(ts_arg_min(close, 60) - ts_arg_max(close, 60))"},
-        {"template_id": "tbr_05", "expression": "rank(close / (kth_element(close, 1, k=60) + 0.001))"},
-        {"template_id": "tbr_06", "expression": "rank((close - kth_element(close, -1, k=60)) / (kth_element(close, 1, k=60) - kth_element(close, -1, k=60) + 0.001))"},
-        {"template_id": "tbr_07", "expression": "rank(volume / (adv20 + 0.001) * close / (kth_element(close, 1, k=60) + 0.001))"},
+        {"template_id": "tbr_05", "expression": "rank(close / (kth_element(close, 60, k=1) + 0.001))"},
+        {"template_id": "tbr_06", "expression": "rank((close - ts_min(close, 60)) / (ts_max(close, 60) - ts_min(close, 60) + 0.001))"},
+        {"template_id": "tbr_07", "expression": "rank(volume / (adv20 + 0.001) * close / (kth_element(close, 60, k=1) + 0.001))"},
         {"template_id": "tbr_08", "expression": "rank(-(ts_arg_max(close, 20) + ts_arg_max(close, 60) + ts_arg_max(close, 120)))"},
         {"template_id": "tbr_09", "expression": "group_rank(-ts_arg_max(close, 40) + ts_arg_min(close, 40), subindustry)"},
         {"template_id": "tbr_10", "expression": "rank(ts_decay_linear(1 / (1 + ts_arg_max(close, 20)), 20))"},
@@ -1443,7 +1443,7 @@ RESEARCH_TEMPLATES = {
         {"template_id": "cxc_05", "expression": "rank(ts_backfill(pv13_com_page_rank, 60)) + rank(-unsystematic_risk_last_60_days) + rank(current_ratio)"},
         {"template_id": "cxc_06", "expression": "rank(snt_buzz) + rank(ts_delta(est_eps, 20)) + rank(equity / (cap + 0.001))"},
         {"template_id": "cxc_07", "expression": "rank(forward_price_60 / (close + 0.001)) + rank(ts_backfill(income, 60) / (cap + 0.001)) + rank(snt_buzz_ret) + rank(-beta_last_360_days_spy)"},
-        {"template_id": "cxc_08", "expression": "rank(call_breakeven_120 / (close + 0.001)) + rank(ebit / (revenue + 0.001)) + rank(scl12_sentiment) + rank(pv13_5l_scibr)"},
+        {"template_id": "cxc_08", "expression": "rank(call_breakeven_120 / (close + 0.001)) + rank(ebit / (revenue + 0.001)) + rank(scl12_sentiment) + group_rank(returns, densify(pv13_5l_scibr))"},
     ],
 
     "composite_adaptive": [
@@ -1710,13 +1710,13 @@ RESEARCH_TEMPLATES = {
     "composite_cross_category": [
         {"template_id": "ccc_01", "expression": "(rank(call_breakeven_60 / (close + 0.001)) + rank(ebitda / (cap + 0.001)) + rank(scl12_sentiment)) / 3"},
         {"template_id": "ccc_02", "expression": "rank(ts_backfill(pv13_com_page_rank, 60)) * rank(est_sales / (revenue + 0.001)) * rank(-historical_volatility_90)"},
-        {"template_id": "ccc_03", "expression": "(rank(put_breakeven_60 / (close + 0.001)) + rank(pv13_5l_scibr) + rank((revenue - cogs) / (revenue + 0.001)) + rank(fscore_quality)) / 4"},
+        {"template_id": "ccc_03", "expression": "(rank(put_breakeven_60 / (close + 0.001)) + group_rank(returns, densify(pv13_5l_scibr)) + rank((revenue - cogs) / (revenue + 0.001)) + rank(fscore_quality)) / 4"},
         {"template_id": "ccc_04", "expression": "rank(snt_value) + rank(est_ebitda / (ebitda + 0.001)) + rank(-beta_last_60_days_spy) + rank(ts_delta(close, 60) / (close + 0.001))"},
         {"template_id": "ccc_05", "expression": "(rank(forward_price_120 / (close + 0.001)) + rank(income / (cap + 0.001)) + rank(scl12_buzz) + rank(ts_backfill(pv13_custretsig_retsig, 60))) / 4"},
         {"template_id": "ccc_06", "expression": "rank(implied_volatility_mean_90 - implied_volatility_mean_30) + rank(ts_backfill(ebitda, 60) / (cap + 0.001)) + rank(fscore_momentum)"},
         {"template_id": "ccc_07", "expression": "rank(ts_backfill(pv13_com_page_rank, 60)) + rank(-call_breakeven_360 / (close + 0.001)) + rank(-unsystematic_risk_last_60_days) + rank(current_ratio)"},
         {"template_id": "ccc_08", "expression": "rank(snt_buzz) + rank(ts_delta(est_eps, 20)) + rank(implied_volatility_mean_180 - implied_volatility_mean_30) + rank(equity / (cap + 0.001))"},
-        {"template_id": "ccc_09", "expression": "signed_power(rank(call_breakeven_120 / (close + 0.001)) + rank(ebit / (revenue + 0.001)) + rank(scl12_sentiment) + rank(pv13_5l_scibr), 0.5)"},
+        {"template_id": "ccc_09", "expression": "signed_power(rank(call_breakeven_120 / (close + 0.001)) + rank(ebit / (revenue + 0.001)) + rank(scl12_sentiment) + group_rank(returns, densify(pv13_5l_scibr)), 0.5)"},
         {"template_id": "ccc_10", "expression": "ts_decay_linear(rank(forward_price_60 / (close + 0.001)) + rank(ts_backfill(income, 60) / (cap + 0.001)) + rank(snt_buzz_ret) + rank(-beta_last_360_days_spy), 10)"},
     ],
 
@@ -1757,6 +1757,148 @@ RESEARCH_TEMPLATES = {
         {"template_id": "ser_09", "expression": "ts_decay_linear(rank(vec_avg(nws18_bee)), 10)"},
         {"template_id": "ser_10", "expression": "rank(ts_mean(vec_avg(nws18_ber), 5)) * rank(-returns)"},
     ],
+
+    # =====================================================================
+    # v7.3: PURE DATA templates — NO price/volume fields at all
+    # These produce PnL profiles genuinely uncorrelated with returns-based alphas
+    # Target: high FITNESS (low turnover) even if Sharpe is moderate
+    # =====================================================================
+
+    # Pure fundamental ratios — quarterly data = ultra-low turnover
+    "pure_fundamental": [
+        {"template_id": "pf_01", "expression": "rank(operating_income / (cap + 0.001))"},
+        {"template_id": "pf_02", "expression": "-rank(enterprise_value / (ebitda + 0.001))"},
+        {"template_id": "pf_03", "expression": "rank(cashflow_op / (cap + 0.001))"},
+        {"template_id": "pf_04", "expression": "rank(ebit / (cap + 0.001))"},
+        {"template_id": "pf_05", "expression": "-rank(total_debt / (equity + 0.001))"},
+        {"template_id": "pf_06", "expression": "rank(free_cash_flow / (cap + 0.001))"},
+        {"template_id": "pf_07", "expression": "rank(revenue / (cap + 0.001))"},
+        {"template_id": "pf_08", "expression": "rank(gross_profit / (assets + 0.001))"},
+        {"template_id": "pf_09", "expression": "rank(retained_earnings / (assets + 0.001))"},
+        {"template_id": "pf_10", "expression": "rank((revenue - cogs) / (cap + 0.001))"},
+        {"template_id": "pf_11", "expression": "rank(working_capital / (assets + 0.001))"},
+        {"template_id": "pf_12", "expression": "-rank(interest_expense / (operating_income + 0.001))"},
+    ],
+
+    # Pure fundamental with time-series (still no price fields)
+    "pure_fundamental_ts": [
+        {"template_id": "pfts_01", "expression": "ts_rank(operating_income / (cap + 0.001), 252)"},
+        {"template_id": "pfts_02", "expression": "-ts_zscore(enterprise_value / (ebitda + 0.001), 252)"},
+        {"template_id": "pfts_03", "expression": "ts_rank(cashflow_op / (cap + 0.001), 252)"},
+        {"template_id": "pfts_04", "expression": "rank(ts_delta(operating_income, 126) / (operating_income + 0.001))"},
+        {"template_id": "pfts_05", "expression": "ts_rank(free_cash_flow / (cap + 0.001), 252)"},
+        {"template_id": "pfts_06", "expression": "rank(ts_delta(ebitda, 252) / (ebitda + 0.001))"},
+        {"template_id": "pfts_07", "expression": "-ts_zscore(total_debt / (equity + 0.001), 252)"},
+        {"template_id": "pfts_08", "expression": "ts_rank(gross_profit / (assets + 0.001), 252)"},
+        {"template_id": "pfts_09", "expression": "rank(-ts_delta(total_debt, 126) / (total_debt + 0.001))"},
+        {"template_id": "pfts_10", "expression": "ts_rank(revenue / (cap + 0.001), 126)"},
+    ],
+
+    # Pure analyst estimates (no price fields)
+    "pure_analyst": [
+        {"template_id": "pa_01", "expression": "group_rank(ts_rank(est_eps / (cap + 0.001), 60), industry)"},
+        {"template_id": "pa_02", "expression": "group_rank(est_ebitda / (cap + 0.001), industry)"},
+        {"template_id": "pa_03", "expression": "ts_rank(est_sales / (cap + 0.001), 120)"},
+        {"template_id": "pa_04", "expression": "rank(ts_delta(est_eps, 60) / (est_eps + 0.001))"},
+        {"template_id": "pa_05", "expression": "group_zscore(est_fcf / (cap + 0.001), subindustry)"},
+        {"template_id": "pa_06", "expression": "rank(est_ptp / (cap + 0.001))"},
+        {"template_id": "pa_07", "expression": "group_rank(ts_delta(est_eps, 20), industry)"},
+        {"template_id": "pa_08", "expression": "rank(est_grossincome / (cap + 0.001))"},
+    ],
+
+    # Pure fn_financial ratios
+    "pure_fn": [
+        {"template_id": "pfn_01", "expression": "rank(fn_oper_income_q / (cap + 0.001))"},
+        {"template_id": "pfn_02", "expression": "ts_rank(fn_oper_income_q / (cap + 0.001), 252)"},
+        {"template_id": "pfn_03", "expression": "rank(fn_cash_from_oper_q / (cap + 0.001))"},
+        {"template_id": "pfn_04", "expression": "-rank(fn_tot_debt_q / (fn_tot_equity_q + 0.001))"},
+        {"template_id": "pfn_05", "expression": "group_zscore(fn_oper_income_q / (cap + 0.001), industry)"},
+        {"template_id": "pfn_06", "expression": "ts_rank(fn_revenue_q / (cap + 0.001), 252)"},
+    ],
+
+    # Pure derivative scores (pre-computed, very low turnover)
+    "pure_deriv_scores": [
+        {"template_id": "pds_01", "expression": "rank(composite_factor_score_derivative)"},
+        {"template_id": "pds_02", "expression": "rank(earnings_certainty_rank_derivative)"},
+        {"template_id": "pds_03", "expression": "rank(fscore_bfl_total)"},
+        {"template_id": "pds_04", "expression": "rank(fscore_bfl_profitability) + rank(fscore_bfl_quality)"},
+        {"template_id": "pds_05", "expression": "ts_rank(composite_factor_score_derivative, 60)"},
+        {"template_id": "pds_06", "expression": "group_rank(fscore_bfl_value, industry)"},
+        {"template_id": "pds_07", "expression": "rank(analyst_revision_rank_derivative)"},
+        {"template_id": "pds_08", "expression": "rank(fscore_bfl_growth) + rank(fscore_bfl_momentum)"},
+    ],
+
+    # Fundamental + analyst combos (no price fields, naturally decorrelated)
+    "pure_fund_analyst": [
+        {"template_id": "pfa_01", "expression": "rank(ts_rank(operating_income / (cap + 0.001), 252)) + group_rank(ts_rank(est_eps / (cap + 0.001), 60), industry)"},
+        {"template_id": "pfa_02", "expression": "rank(cashflow_op / (cap + 0.001)) + rank(est_fcf / (cap + 0.001))"},
+        {"template_id": "pfa_03", "expression": "rank(ebitda / (cap + 0.001)) + rank(ts_delta(est_ebitda, 60))"},
+        {"template_id": "pfa_04", "expression": "rank(gross_profit / (assets + 0.001)) + group_rank(est_sales / (cap + 0.001), industry)"},
+        {"template_id": "pfa_05", "expression": "rank(free_cash_flow / (cap + 0.001)) + rank(fscore_bfl_total)"},
+        {"template_id": "pfa_06", "expression": "rank(operating_income / (cap + 0.001)) + rank(composite_factor_score_derivative)"},
+    ],
+
+    # v7.3: OPERATOR DIVERSITY — same signals with different normalization = different PnL
+    # quantile() vs rank() vs normalize() vs scale() produce decorrelated outputs
+    "alt_normalization": [
+        {"template_id": "an_01", "expression": "quantile(operating_income / (cap + 0.001))"},
+        {"template_id": "an_02", "expression": "quantile(ts_rank(operating_income / (cap + 0.001), 252))"},
+        {"template_id": "an_03", "expression": "normalize(operating_income / (cap + 0.001))"},
+        {"template_id": "an_04", "expression": "scale(ts_rank(cashflow_op / (cap + 0.001), 252))"},
+        {"template_id": "an_05", "expression": "quantile(ebitda / (enterprise_value + 0.001))"},
+        {"template_id": "an_06", "expression": "normalize(ts_rank(free_cash_flow / (cap + 0.001), 252))"},
+        {"template_id": "an_07", "expression": "quantile(gross_profit / (assets + 0.001))"},
+        {"template_id": "an_08", "expression": "scale(equity / (cap + 0.001))"},
+        {"template_id": "an_09", "expression": "quantile(group_rank(est_eps / (cap + 0.001), industry))"},
+        {"template_id": "an_10", "expression": "normalize(est_ebitda / (cap + 0.001))"},
+    ],
+
+    # v7.3: TURNOVER REDUCTION — hump() directly boosts fitness
+    "low_turnover": [
+        {"template_id": "lt_01", "expression": "hump(rank(operating_income / (cap + 0.001)), hump=0.01)"},
+        {"template_id": "lt_02", "expression": "hump(rank(cashflow_op / (cap + 0.001)), hump=0.01)"},
+        {"template_id": "lt_03", "expression": "hump(rank(ebitda / (enterprise_value + 0.001)), hump=0.01)"},
+        {"template_id": "lt_04", "expression": "hump(quantile(operating_income / (cap + 0.001)), hump=0.01)"},
+        {"template_id": "lt_05", "expression": "hump(rank(free_cash_flow / (cap + 0.001)), hump=0.01)"},
+        {"template_id": "lt_06", "expression": "hump(rank(gross_profit / (assets + 0.001)), hump=0.01)"},
+        {"template_id": "lt_07", "expression": "hump(group_rank(est_eps / (cap + 0.001), industry), hump=0.01)"},
+        {"template_id": "lt_08", "expression": "hump(rank(revenue / (cap + 0.001)), hump=0.01)"},
+    ],
+
+    # v7.3: COMPOUNDING MOMENTUM — ts_product for geometric returns
+    "compound_momentum": [
+        {"template_id": "cm_01", "expression": "-rank(ts_product(1 + returns, 5))"},
+        {"template_id": "cm_02", "expression": "-rank(ts_product(1 + returns, 20))"},
+        {"template_id": "cm_03", "expression": "rank(ts_product(1 + returns, 60)) * rank(-ts_product(1 + returns, 5))"},
+        {"template_id": "cm_04", "expression": "-quantile(ts_product(1 + returns, 10))"},
+        {"template_id": "cm_05", "expression": "hump(-rank(ts_product(1 + returns, 5)), hump=0.01)"},
+        {"template_id": "cm_06", "expression": "rank(ts_product(operating_income / (cap + 0.001), 4))"},
+    ],
+
+    # v7.3: DATA QUALITY — ts_count_nans as a signal
+    "data_quality": [
+        {"template_id": "dq_01", "expression": "-rank(ts_count_nans(est_eps, 60))"},
+        {"template_id": "dq_02", "expression": "rank(ts_count_nans(est_eps, 252)) * rank(operating_income / (cap + 0.001))"},
+        {"template_id": "dq_03", "expression": "-rank(ts_count_nans(cashflow_op, 120))"},
+        {"template_id": "dq_04", "expression": "rank(ts_count_nans(revenue, 60)) * rank(-returns)"},
+    ],
+
+    # v7.3: REMAINING OPERATORS — group_backfill, group_scale, last_diff_value
+    "group_fill_scale": [
+        {"template_id": "gfs_01", "expression": "rank(group_backfill(operating_income / (cap + 0.001), industry, 20))"},
+        {"template_id": "gfs_02", "expression": "rank(group_backfill(cashflow_op / (cap + 0.001), industry, 20))"},
+        {"template_id": "gfs_03", "expression": "group_scale(operating_income / (cap + 0.001), industry)"},
+        {"template_id": "gfs_04", "expression": "group_scale(ebitda / (cap + 0.001), industry)"},
+        {"template_id": "gfs_05", "expression": "group_scale(est_eps / (cap + 0.001), industry)"},
+        {"template_id": "gfs_06", "expression": "group_scale(cashflow_op / (cap + 0.001), subindustry)"},
+    ],
+
+    "regime_change": [
+        {"template_id": "rc_01", "expression": "rank(last_diff_value(est_eps, 60))"},
+        {"template_id": "rc_02", "expression": "rank(last_diff_value(operating_income, 120))"},
+        {"template_id": "rc_03", "expression": "rank(-days_from_last_change(est_eps)) * rank(last_diff_value(est_eps, 60))"},
+        {"template_id": "rc_04", "expression": "rank(last_diff_value(revenue, 120))"},
+    ],
 }
 
 EWAN_ONLY_FAMILIES = {
@@ -1784,12 +1926,30 @@ for f in ["interact_size_x_value_x_quality"]:
     RESEARCH_NEUTRALIZATIONS[f] = ["MARKET", "SECTOR"]
 for f in ["composite_adaptive_regime"]:
     RESEARCH_NEUTRALIZATIONS[f] = ["SECTOR", "INDUSTRY"]
+# v7.3: Pure data families — use INDUSTRY neutralization (proven best for fundamentals)
+for f in ["pure_fundamental", "pure_fundamental_ts", "pure_fn", "pure_fund_analyst"]:
+    RESEARCH_NEUTRALIZATIONS[f] = ["INDUSTRY", "SUBINDUSTRY"]
+for f in ["pure_analyst"]:
+    RESEARCH_NEUTRALIZATIONS[f] = ["INDUSTRY", "SUBINDUSTRY"]
+for f in ["pure_deriv_scores"]:
+    RESEARCH_NEUTRALIZATIONS[f] = ["INDUSTRY", "SUBINDUSTRY", "MARKET"]
+# v7.3: Operator diversity families
+for f in ["alt_normalization", "low_turnover"]:
+    RESEARCH_NEUTRALIZATIONS[f] = ["INDUSTRY", "SUBINDUSTRY"]
+for f in ["compound_momentum"]:
+    RESEARCH_NEUTRALIZATIONS[f] = ["MARKET", "SECTOR"]
+for f in ["data_quality"]:
+    RESEARCH_NEUTRALIZATIONS[f] = ["INDUSTRY", "SUBINDUSTRY"]
+for f in ["group_fill_scale", "regime_change"]:
+    RESEARCH_NEUTRALIZATIONS[f] = ["INDUSTRY", "SUBINDUSTRY"]
 
 # Weights: new families get 5.0, model77 get 4.0
 RESEARCH_WEIGHTS = {}
 for fam in RESEARCH_TEMPLATES:
     if fam in EWAN_ONLY_FAMILIES:
         RESEARCH_WEIGHTS[fam] = 4.0
+    elif fam.startswith("pure_") or fam in {"alt_normalization", "low_turnover"}:
+        RESEARCH_WEIGHTS[fam] = 7.0  # v7.3: HIGHEST — decorrelated from entire portfolio
     elif fam.startswith("gap_") or fam.startswith("opt_") or fam.startswith("sc_"):
         RESEARCH_WEIGHTS[fam] = 6.0  # Highest priority — untouched data categories
     elif fam.startswith("deriv_") or fam.startswith("composite_") or fam.startswith("interact_"):

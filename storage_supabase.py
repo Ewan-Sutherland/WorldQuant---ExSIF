@@ -55,7 +55,7 @@ class Storage:
     # ── HTTP helpers ──────────────────────────────────────────────────
 
     def _get(self, table: str, params: dict | None = None) -> list[dict]:
-        r = requests.get(f"{self.base}/{table}", headers=self.headers, params=params or {})
+        r = requests.get(f"{self.base}/{table}", headers=self.headers, params=params or {}, timeout=30)
         if r.status_code not in (200, 206):
             logger.warning(f"GET {table} failed: {r.status_code} {r.text[:300]}")
             return []
@@ -68,7 +68,7 @@ class Storage:
             headers["Prefer"] = "resolution=merge-duplicates,return=representation"
             if on_conflict:
                 url += f"?on_conflict={on_conflict}"
-        r = requests.post(url, headers=headers, json=data)
+        r = requests.post(url, headers=headers, json=data, timeout=30)
         if r.status_code not in (200, 201):
             logger.warning(f"POST {table} failed: {r.status_code} {r.text[:300]}")
             return None
@@ -77,7 +77,7 @@ class Storage:
 
     def _patch(self, table: str, match: dict, data: dict) -> dict | None:
         params = {k: f"eq.{v}" for k, v in match.items()}
-        r = requests.patch(f"{self.base}/{table}", headers=self.headers, params=params, json=data)
+        r = requests.patch(f"{self.base}/{table}", headers=self.headers, params=params, json=data, timeout=30)
         if r.status_code not in (200, 204):
             logger.warning(f"PATCH {table} failed: {r.status_code} {r.text[:300]}")
             return None
@@ -86,7 +86,7 @@ class Storage:
 
     def _delete(self, table: str, match: dict) -> bool:
         params = {k: f"eq.{v}" for k, v in match.items()}
-        r = requests.delete(f"{self.base}/{table}", headers=self.headers, params=params)
+        r = requests.delete(f"{self.base}/{table}", headers=self.headers, params=params, timeout=30)
         return r.status_code in (200, 204)
 
     def _rpc(self, function: str, params: dict | None = None) -> list[dict]:
@@ -94,6 +94,7 @@ class Storage:
             f"{self.base}/rpc/{function}",
             headers=self.headers,
             json=params or {},
+            timeout=30,
         )
         if r.status_code != 200:
             logger.warning(f"RPC {function} failed: {r.status_code} {r.text[:300]}")

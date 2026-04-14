@@ -412,7 +412,9 @@ def get_fresh_fundamental_fields() -> list[str]:
     """Fundamental fields NOT in any existing submission — guaranteed decorrelated."""
     names = get_all_field_names()
     fund = names.get("fundamental", [])
-    return [f for f in fund if f.lower() not in _SATURATED_FIELDS and len(f) > 3 and "event" not in f.lower()]
+    # Exclude fnd6_/fnd2_ event fields — they need ts_backfill() and break {field}/cap patterns
+    return [f for f in fund if f.lower() not in _SATURATED_FIELDS and len(f) > 3
+            and "event" not in f.lower() and not f.startswith("fnd6_") and not f.startswith("fnd2_")]
 
 
 def get_fresh_fn_fields() -> list[str]:

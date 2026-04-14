@@ -133,10 +133,10 @@ class SignalCombiner:
                 self._near_passers_by_category[category] = []
             self._near_passers_by_category[category].append(entry)
 
-        # Sort each category by sharpe descending
+        # v7.3: Sort by composite score: fitness matters MORE than sharpe for score impact
         for cat in self._near_passers_by_category:
             self._near_passers_by_category[cat].sort(
-                key=lambda x: x["sharpe"], reverse=True,
+                key=lambda x: x.get("fitness", 0) * 0.6 + x["sharpe"] * 0.4, reverse=True,
             )
 
         total = sum(len(v) for v in self._near_passers_by_category.values())
@@ -147,28 +147,36 @@ class SignalCombiner:
         )
 
     # v6.2.1: Categories that are proven portfolio-ADDITIVE (genuinely different data)
-    # The portfolio is saturated with price_returns/model77/fundamental.
-    # Combos that include one of these categories are far more likely to improve score.
     PORTFOLIO_ADDITIVE_CATS = {"options_vol", "news", "sentiment", "risk", "vector_data", "model_data", "event_driven"}
+
+    # v7.3: Fields that DOMINATE PnL profiles — wrapping diverse signals with these
+    # makes PnL correlate with the 40% of portfolio that already uses returns/IV
+    PNL_SATURATED_KEYWORDS = {"returns", "close", "open", "high", "low", "vwap",
+        "implied_volatility", "parkinson_volatility", "historical_volatility", "adv20", "volume"}
+
+    # v7.3: Non-price categories for pure-data combos
+    NON_PRICE_CATS = {"fundamental", "analyst_estimates", "news", "sentiment",
+        "fscore", "event_driven", "vector_data", "relationship"}
+
+    def _pnl_saturation_score(self, expr: str) -> float:
+        """Return 0.0 (pure non-price) to 1.0 (fully price-driven)."""
+        fields = self._extract_fields(expr)
+        if not fields:
+            return 0.5
+        saturated = sum(1 for f in fields
+                       if any(s in f.lower() for s in self.PNL_SATURATED_KEYWORDS))
+        return saturated / len(fields)
 
     def generate_combo(self, n_signals: int = 2) -> Optional[str]:
         """
-        Generate a composite expression combining n_signals from different categories.
-        Returns expression string or None if not enough diversity.
-        
-        v6.2.1: Biased toward including at least one portfolio-additive category
-        (options_vol, news, sentiment, risk) since those are proven to improve score.
-        
-        Research finding: rank(A * B) outperforms rank(A) + rank(B).
-        Three forms (picked randomly):
-          - rank(raw_A * raw_B)           — multiplicative raw (best per research)
-          - rank(raw_A) * rank(raw_B)     — multiplicative ranked 
-          - rank(raw_A) + rank(raw_B)     — additive (baseline)
+        v7.3: Three generation modes for PnL diversity:
+          50% PURE DATA  — both components non-price, additive combination
+          30% DIVERSITY   — one additive cat (NOT options_vol) + one other
+          20% EXPLORATION — random categories
         """
         if len(self._near_passers_by_category) < n_signals:
             return None
 
-        # Pick n_signals different categories
         available_cats = [
             c for c, entries in self._near_passers_by_category.items()
             if entries
@@ -176,55 +184,83 @@ class SignalCombiner:
         if len(available_cats) < n_signals:
             return None
 
-        # v6.2.1: Bias toward portfolio-additive categories
-        # 70% of the time, force one component from the additive set
-        additive_available = [c for c in available_cats if c in self.PORTFOLIO_ADDITIVE_CATS]
-        other_available = [c for c in available_cats if c not in self.PORTFOLIO_ADDITIVE_CATS]
+        # v7.3: Determine generation mode
+        roll = self.rng.random()
+        non_price_avail = [c for c in available_cats if c in self.NON_PRICE_CATS]
 
-        if additive_available and other_available and self.rng.random() < 0.70:
-            # Pick one additive + rest from other categories
-            first_cat = self.rng.choice(additive_available)
-            remaining_pool = [c for c in available_cats if c != first_cat]
-            if len(remaining_pool) >= n_signals - 1:
-                rest = self.rng.sample(remaining_pool, n_signals - 1)
-                chosen_cats = [first_cat] + rest
+        if roll < 0.50 and len(non_price_avail) >= n_signals:
+            chosen_cats = self.rng.sample(non_price_avail, n_signals)
+            combo_mode = "pure_data"
+        elif roll < 0.80:
+            # DIVERSITY mode — exclude options_vol from first pick to reduce IV contamination
+            additive_no_iv = [c for c in available_cats
+                             if c in self.PORTFOLIO_ADDITIVE_CATS and c != "options_vol"]
+            other_available = [c for c in available_cats if c not in self.PORTFOLIO_ADDITIVE_CATS]
+            if additive_no_iv and other_available:
+                first_cat = self.rng.choice(additive_no_iv)
+                remaining_pool = [c for c in available_cats if c != first_cat and c != "options_vol"]
+                if len(remaining_pool) >= n_signals - 1:
+                    rest = self.rng.sample(remaining_pool, n_signals - 1)
+                    chosen_cats = [first_cat] + rest
+                else:
+                    chosen_cats = self.rng.sample(available_cats, n_signals)
             else:
                 chosen_cats = self.rng.sample(available_cats, n_signals)
+            combo_mode = "diversity"
         else:
             chosen_cats = self.rng.sample(available_cats, n_signals)
+            combo_mode = "exploration"
 
-        # Pick the best signal from each category (with novelty weighting)
+        # Pick components with novelty + saturation-aware weighting
+        max_component_ops = 25 if n_signals == 2 else 18
         components = []
         for cat in chosen_cats:
             entries = self._near_passers_by_category[cat]
-            pool = entries[:min(5, len(entries))]  # v7.1: wider pool (was 3)
+            simple_entries = [e for e in entries if self._count_operators(e["expression"]) <= max_component_ops]
+            if not simple_entries:
+                simple_entries = entries[:3]
+            pool = simple_entries[:min(8, len(simple_entries))]
 
-            # v7.1: Score by novelty — prefer near-passers with fields NOT in submissions
+            # v7.3: Score by novelty + PnL saturation penalty + fitness bonus
             if self._submitted_fields and len(pool) > 1:
                 scored = []
                 for entry in pool:
                     fields = set(self._extract_fields(entry["expression"]))
                     if fields:
                         overlap = len(fields & self._submitted_fields) / len(fields)
-                        novelty = 1.0 - overlap  # 1.0 = completely new fields, 0.0 = all submitted
+                        novelty = 1.0 - overlap
                     else:
                         novelty = 0.5
-                    # Weight: novelty matters more than sharpe for decorrelation
-                    weight = max(0.01, novelty * 2.0 + entry["sharpe"] * 0.5)
+                    # v7.3: Penalize components using PnL-saturated fields (returns, IV, etc)
+                    saturation = self._pnl_saturation_score(entry["expression"])
+                    pnl_penalty = 1.0 - (saturation * 0.6)  # 0.4 to 1.0
+
+                    # v7.3: In pure_data mode, STRONGLY penalize any price-field usage
+                    if combo_mode == "pure_data":
+                        pnl_penalty = max(0.05, 1.0 - saturation * 2.0)
+
+                    # v7.3: Fitness bonus — high fitness = low turnover = better score impact
+                    fitness_bonus = min(entry.get("fitness", 0.5), 2.0) * 0.5
+
+                    weight = max(0.01, novelty * 2.0 + fitness_bonus + pnl_penalty + entry["sharpe"] * 0.3)
                     scored.append((entry, weight))
                 chosen = self.rng.choices([s[0] for s in scored], weights=[s[1] for s in scored], k=1)[0]
             else:
                 chosen = self.rng.choice(pool)
             components.append(chosen)
 
-        # Pick combination mode — research says multiplicative raw is best
-        roll = self.rng.random()
-        if roll < 0.45:
-            mode = "mult_raw"      # rank(A * B) — best per research
-        elif roll < 0.75:
-            mode = "mult_ranked"   # rank(A) * rank(B)
+        # v7.3: Pick combination mode based on combo_mode
+        if combo_mode == "pure_data":
+            # Pure data combos: ALWAYS additive — keeps PnL profiles independent
+            mode = "additive"
         else:
-            mode = "additive"      # rank(A) + rank(B) — baseline
+            roll2 = self.rng.random()
+            if roll2 < 0.35:
+                mode = "mult_raw"
+            elif roll2 < 0.65:
+                mode = "mult_ranked"
+            else:
+                mode = "additive"
 
         if n_signals == 2:
             expr = self._build_two_signal_combo(components[0], components[1], mode)
@@ -241,12 +277,44 @@ class SignalCombiner:
 
         cats_str = "+".join(c["category"] for c in components)
         sharpes = [c["sharpe"] for c in components]
+        sat_scores = [f"{self._pnl_saturation_score(c['expression']):.1f}" for c in components]
         print(
-            f"[COMBO_GEN] categories={cats_str} mode={mode} "
-            f"component_sharpes={[f'{s:.2f}' for s in sharpes]}"
+            f"[COMBO_GEN] categories={cats_str} mode={mode} combo_mode={combo_mode} "
+            f"component_sharpes={[f'{s:.2f}' for s in sharpes]} "
+            f"pnl_saturation={sat_scores}"
         )
 
+        # v7.3: Fix rank(x, group) → group_rank(x, group)
+        expr = self._fix_rank_group(expr)
+
         return expr
+
+    @staticmethod
+    def _fix_rank_group(expr: str) -> str:
+        """Fix rank(x, industry) → group_rank(x, industry) using balanced paren matching."""
+        result = []
+        i = 0
+        while i < len(expr):
+            if expr[i:i+5] == 'rank(' and (i == 0 or not expr[i-1].isalpha()):
+                depth = 1
+                j = i + 5
+                while j < len(expr) and depth > 0:
+                    if expr[j] == '(': depth += 1
+                    elif expr[j] == ')': depth -= 1
+                    j += 1
+                inner = expr[i+5:j-1]
+                for grp in ['industry', 'subindustry', 'sector', 'market']:
+                    if inner.rstrip().endswith(f', {grp}'):
+                        result.append('group_rank(' + inner + ')')
+                        i = j
+                        break
+                else:
+                    result.append(expr[i])
+                    i += 1
+            else:
+                result.append(expr[i])
+                i += 1
+        return ''.join(result)
 
     @staticmethod
     def _count_operators(expr: str) -> int:
