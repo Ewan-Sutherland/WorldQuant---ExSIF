@@ -24,27 +24,54 @@ from functools import lru_cache
 # {F} = gap field, {G} = grouping (industry/subindustry)
 # These 12 patterns cover the structures behind every submitted alpha.
 GAP_PATTERNS = [
-    # Simple standalone — like Luca's +158 revenue alpha
+    # ── STANDALONE (simple, like Luca's +158) ──
     ("gap_standalone_rank", "rank(ts_rank({F} / (cap + 0.001), {long_window}))"),
     ("gap_standalone_zscore", "rank(ts_zscore({F}, {short_window}))"),
     ("gap_standalone_delta", "rank(ts_rank(ts_delta({F}, {mid_window}) / (abs(ts_delay({F}, {mid_window})) + 0.001), {long_window}))"),
     ("gap_standalone_smooth", "ts_mean(rank(ts_rank({F} / (cap + 0.001), {long_window})), {smooth_window})"),
+    ("gap_standalone_neg_zscore", "rank(-ts_zscore({F}, {mid_window}))"),
     
-    # Group-relative — like the +198 fn_ alpha
+    # ── GROUP RELATIVE (like the +198 fn_ alpha) ──
     ("gap_group_rank", "group_rank(ts_rank({F} / (cap + 0.001), {long_window}), {G})"),
     ("gap_group_zscore", "group_rank(ts_zscore({F}, {mid_window}), {G})"),
+    ("gap_group_neutralize", "group_neutralize(ts_rank({F} / (cap + 0.001), {long_window}), {G})"),
     
-    # With reversion component — like Griff's +28 alphas
+    # ── VALUE + REVERSION (like Griff's +28) ──
     ("gap_plus_reversion", "rank(ts_rank({F} / (cap + 0.001), {long_window})) + rank(-ts_mean(returns, {reversion_window}))"),
-    ("gap_times_reversion", "rank(ts_backfill({F}, 60)) * rank(-returns)"),
+    ("gap_backfill_times_rev", "rank(ts_backfill({F}, 60)) * rank(-returns)"),
     ("gap_group_plus_rev", "group_rank(ts_rank({F} / (cap + 0.001), {long_window}), {G}) + rank(-ts_mean(returns, {reversion_window}))"),
+    ("gap_vwap_reversion", "rank(ts_rank({F} / (cap + 0.001), {long_window})) + -rank(ts_mean((close - vwap) / vwap, {reversion_window}))"),
+    ("gap_debt_combo", "rank(ts_rank({F} / (cap + 0.001), {long_window})) + -rank(ts_zscore(debt, 30))"),
     
-    # Cross-field correlation — like the +16 ts_corr(est_dividend_ps, capex) alpha
+    # ── MULTIPLICATIVE (proven in submitted portfolio) ──
+    ("gap_mult_reversion", "rank({F} / (cap + 0.001)) * rank(-returns)"),
+    ("gap_mult_volume", "rank(ts_rank({F} / (cap + 0.001), {long_window})) * rank(volume / (adv20 + 0.001))"),
+    ("gap_mult_liquidity", "rank({F}) * rank(adv20)"),
+    
+    # ── MULTI-TIMEFRAME (fv_08 pattern — proven submitted) ──
+    ("gap_multi_tf", "rank(ts_rank({F} / (cap + 0.001), 22)) * rank(ts_rank({F} / (cap + 0.001), 252))"),
+    ("gap_multi_tf_60_252", "rank(ts_rank({F} / (cap + 0.001), 60)) * rank(ts_rank({F} / (cap + 0.001), 252))"),
+    
+    # ── VOL REGIME CONDITIONAL (trade_when — proven submitted) ──
+    ("gap_vol_regime", "trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.5, rank({F} / (cap + 0.001)), -1)"),
+    ("gap_vol_regime_rev", "rank(trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.5, rank(-returns), -1)) * rank({F} / (cap + 0.001))"),
+    
+    # ── CROSS-FIELD CORRELATION (the +16 alpha used this) ──
     ("gap_cross_corr", "rank(-ts_corr(rank({F}), rank({F2}), {long_window}))"),
+    ("gap_cross_corr_short", "rank(-ts_corr(rank({F}), rank({F2}), {mid_window}))"),
     
-    # Backfill for sparse fields (ravenpack, events, news)
+    # ── WINSORIZED / ROBUST ──
+    ("gap_winsorized_group", "rank(winsorize(group_rank(ts_rank({F} / (cap + 0.001), {long_window}), {G}), std=4))"),
+    ("gap_signed_power", "rank(signed_power(group_rank({F} / (cap + 0.001), {G}), 0.5))"),
+    
+    # ── TREND EXTRACTION (ts_regression residual) ──
+    ("gap_regression_trend", "rank(ts_regression({F}, ts_step(1), {mid_window}, rettype=2))"),
+    
+    # ── BACKFILL (for sparse/event fields like rp_*, news) ──
     ("gap_backfill_rank", "rank(ts_backfill({F}, 60))"),
     ("gap_backfill_reversion", "rank(ts_decay_linear(ts_backfill({F}, 60), {smooth_window})) * rank(-returns)"),
+    ("gap_backfill_group", "group_rank(ts_backfill({F}, 60), {G})"),
+    ("gap_backfill_plus_rev", "rank(ts_decay_linear(ts_backfill({F}, 60), {smooth_window})) + rank(-ts_mean(returns, {reversion_window}))"),
 ]
 
 # Fields that need ts_backfill() wrapping (sparse/event data)
@@ -87,6 +114,50 @@ SKIP_TOKENS = {
     'on', 'off', 'verify', 'fastexpr', 'usa', 'equity',
     'filter', 'rate', 'lookback', 'driver', 'gaussian',
     'condition', 'raw_signal',
+}
+
+# Weighted category selection — based on 40K+ sims of evidence.
+# Higher weight = more gap mining attempts in that category.
+CATEGORY_WEIGHTS = {
+    "fn_financial": 10.0,        # 316 fields, only 2 used, proven +198 score
+    "news_events": 8.0,          # rp_css/rp_ess fields, proven +28 score
+    "supply_chain": 7.0,         # pv13_*, rel_ret_* — untapped network effects
+    "options": 6.0,              # different IV tenors — proven category
+    "fundamental": 5.0,          # core fundamentals not yet tried
+    "hist_vol": 5.0,             # vol fields not yet tried
+    "social_sentiment": 4.0,     # scl12/scl15 sentiment
+    "research_sentiment": 4.0,   # snt1_ fields
+    "analyst_estimates": 3.0,    # est_ebitda etc (NOT anl4_)
+    "news_data": 3.0,            # news microstructure
+    "vector_data": 3.0,          # vec fields
+    "derivative_scores": 2.0,    # fscore derivatives
+    "risk_beta": 2.0,            # beta fields
+    "model77": 0.5,              # 3238 fields but 0% eligible in 214 sims — near-dead
+    "price_volume": 0.1,         # mostly metadata (cusip, currency)
+    "universe_membership": 0.0,  # not tradable signals
+}
+
+# Field name patterns that are metadata, not tradable signals
+METADATA_PATTERNS = (
+    'currency', 'cusip', 'isin', 'sedol', 'ticker', 'country', 'exchange',
+    'reporting', 'fiscal', 'flag', '_item', '_code', 'gvkey', 'permno',
+    'date', 'sector_code', 'industry_code',
+)
+
+# Field-to-pattern compatibility. Some patterns don't suit some field types.
+# Key = field prefix, Value = pattern name substrings to EXCLUDE
+FIELD_PATTERN_EXCLUSIONS = {
+    # Ravenpack/news event scores: don't divide by cap (they're scores 0-100)
+    'rp_css_': ('_rank', '_zscore', '_delta', '_smooth', '_group_rank', '_group_zscore',
+                '_multi_tf', '_vol_regime', '_regression', '_winsorized', '_signed'),
+    'rp_ess_': ('_rank', '_zscore', '_delta', '_smooth', '_group_rank', '_group_zscore',
+                '_multi_tf', '_vol_regime', '_regression', '_winsorized', '_signed'),
+    'rp_nip_': ('_rank', '_zscore', '_delta', '_smooth', '_group_rank', '_group_zscore',
+                '_multi_tf', '_vol_regime', '_regression', '_winsorized', '_signed'),
+    # Beta fields: already ratios, don't divide by cap
+    'beta_': ('_rank', '_delta', '_smooth', '_multi_tf'),
+    # Derivative scores: already composite scores
+    'composite_factor_score': ('_rank', '_delta', '_multi_tf'),
 }
 
 
@@ -162,15 +233,25 @@ class FieldGapMiner:
         self._gap_fields = []
         self._gap_by_category = {}
 
+        # v7.2.1: Fields with these prefixes are ECONOMICALLY similar to
+        # portfolio fields even if the exact name is different.
+        # anl4_* = analyst estimates (same signal as est_eps)
+        # actual_* = actuals (same signal as eps/revenue)
+        # These pass self-corr at 0.63 but score -34 to -180.
+        economically_saturated_prefixes = set()
+        # Only suppress if the economic category is already represented
+        if any(f.startswith('est_') for f in self._portfolio_fields):
+            economically_saturated_prefixes.update(('anl4_', 'actual_'))
+
         # Priority categories — these have proven alpha potential
         priority_order = [
-            "analyst_estimates",  # est_ebitda, est_revenue etc
-            "fundamental",       # gross_profit, working_capital etc
-            "fn_financial",      # 5000+ fn_ fields, only 2 used
+            "fn_financial",      # 5000+ fn_ fields, only 2 used — HIGHEST PRIORITY
             "supply_chain",      # rel_ret_sup, pv13_* etc
+            "fundamental",       # gross_profit, working_capital etc
             "options",           # IV tenors not yet tried
             "news_data",         # sentiment fields
             "social_sentiment",  # scl15_*, snt_ fields
+            "analyst_estimates", # est_ebitda, est_revenue (NOT anl4_*)
             "news_events",       # nws18_ (need vec_avg wrapper)
             "vector_data",       # vec fields
             "risk_beta",         # beta fields
@@ -182,7 +263,9 @@ class FieldGapMiner:
         for category in priority_order:
             fields = self._all_fields.get(category, [])
             gap = [f for f in fields if f.lower() not in self._portfolio_fields
-                   and f.lower() not in {'industry', 'subindustry', 'sector', 'market'}]
+                   and f.lower() not in {'industry', 'subindustry', 'sector', 'market'}
+                   and not any(f.lower().startswith(p) for p in economically_saturated_prefixes)
+                   and not any(m in f.lower() for m in METADATA_PATTERNS)]
             if gap:
                 self._gap_by_category[category] = gap
                 all_gap.extend(gap)
@@ -192,7 +275,9 @@ class FieldGapMiner:
             if category in priority_order:
                 continue
             gap = [f for f in fields if f.lower() not in self._portfolio_fields
-                   and f.lower() not in {'industry', 'subindustry', 'sector', 'market'}]
+                   and f.lower() not in {'industry', 'subindustry', 'sector', 'market'}
+                   and not any(f.lower().startswith(p) for p in economically_saturated_prefixes)
+                   and not any(m in f.lower() for m in METADATA_PATTERNS)]
             if gap:
                 self._gap_by_category[category] = gap
                 all_gap.extend(gap)
@@ -205,12 +290,40 @@ class FieldGapMiner:
             print(f"  {cat}: {len(fields)} gap fields (e.g. {', '.join(fields[:3])})")
 
     def _next_field(self) -> Optional[str]:
-        """Get next gap field, rotating systematically."""
-        if not self._gap_fields:
+        """Get next gap field using WEIGHTED category selection.
+        
+        Categories are weighted by proven alpha potential — fn_financial
+        gets 10x the weight of model77 because fn_ fields have proven
+        +198 score impact while model77 has 0% eligible rate.
+        Within each category, pick a random field.
+        """
+        if not self._gap_by_category:
             return None
-        field = self._gap_fields[self._field_index % len(self._gap_fields)]
+        cats = list(self._gap_by_category.keys())
+        if not cats:
+            return None
+        
+        # Weighted selection by category
+        weights = [CATEGORY_WEIGHTS.get(c, 1.0) for c in cats]
+        total_w = sum(weights)
+        if total_w <= 0:
+            return None
+        
+        # Weighted random choice
+        r = self.rng.random() * total_w
+        cumulative = 0
+        chosen_cat = cats[0]
+        for cat, w in zip(cats, weights):
+            cumulative += w
+            if r <= cumulative:
+                chosen_cat = cat
+                break
+        
+        fields = self._gap_by_category[chosen_cat]
+        if not fields:
+            return None
         self._field_index += 1
-        return field
+        return self.rng.choice(fields)
 
     def _needs_backfill(self, field: str) -> bool:
         """Check if field needs ts_backfill() wrapping."""
@@ -256,13 +369,33 @@ class FieldGapMiner:
         group = self.rng.choice(["industry", "subindustry"])
 
         # Pick a pattern
-        # For sparse fields, prefer backfill patterns
-        if self._needs_backfill(field) or self._needs_vec_avg(field):
-            eligible_patterns = [p for p in GAP_PATTERNS if 'backfill' in p[0] or 'reversion' in p[0]]
+        # For sparse fields, ONLY use backfill patterns (they handle wrapping)
+        # For non-sparse fields, EXCLUDE backfill patterns
+        is_sparse = self._needs_backfill(field) or self._needs_vec_avg(field)
+        if is_sparse:
+            eligible_patterns = [p for p in GAP_PATTERNS if 'backfill' in p[0]]
             if not eligible_patterns:
-                eligible_patterns = GAP_PATTERNS
+                eligible_patterns = GAP_PATTERNS[:5]
+            # Backfill patterns already have ts_backfill in template,
+            # so use RAW field name — don't double-wrap
+            wrapped = field
+            if self._needs_vec_avg(field):
+                wrapped = f"vec_avg({field})"  # vec_avg only, backfill is in pattern
         else:
-            eligible_patterns = GAP_PATTERNS
+            eligible_patterns = [p for p in GAP_PATTERNS if 'backfill' not in p[0]]
+            if not eligible_patterns:
+                eligible_patterns = GAP_PATTERNS[:5]
+
+        # v7.2.1: Additional field-pattern compatibility filter
+        # Skip patterns that divide by cap for score/ratio type fields
+        fl = field.lower()
+        for prefix, excluded_suffixes in FIELD_PATTERN_EXCLUSIONS.items():
+            if fl.startswith(prefix):
+                eligible_patterns = [p for p in eligible_patterns
+                                     if not any(s in p[0] for s in excluded_suffixes)]
+                break
+        if not eligible_patterns:
+            eligible_patterns = [p for p in GAP_PATTERNS if 'backfill' in p[0]] if is_sparse else GAP_PATTERNS[:5]
 
         pattern_id, pattern_template = self.rng.choice(eligible_patterns)
 

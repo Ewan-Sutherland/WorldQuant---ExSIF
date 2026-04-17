@@ -2563,10 +2563,29 @@ class AlphaBot:
     def _get_candidate_with_refinement_priority(self):
         last_base_tried = None
 
+        # v7.2.1: Adaptive refinement drain — when queue is large,
+        # shift sim budget heavily toward refinement to process it.
+        # Check queue size every 25 completions to avoid hammering Supabase.
+        if self.completed_runs % 25 == 0:
+            try:
+                pending = self.storage._get("refinement_queue", {
+                    "consumed": "eq.false",
+                    "select": "candidate_id",
+                }) or []
+                self._cached_queue_size = len(pending)
+            except Exception:
+                pass
+
+        queue_size = getattr(self, "_cached_queue_size", 0)
+        if queue_size > 50:
+            refine_prob = 0.85  # Drain mode: 85% refinement
+        else:
+            refine_prob = config.REFINEMENT_PROBABILITY  # Normal: 55%
+
         for _ in range(8):
             refinement_row = None
 
-            if self.generator.rng.random() < config.REFINEMENT_PROBABILITY:
+            if self.generator.rng.random() < refine_prob:
                 refinement_row = self.storage.get_next_refinement_candidate()
 
             if refinement_row is not None:
