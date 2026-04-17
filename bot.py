@@ -649,6 +649,15 @@ class AlphaBot:
                 self.generator.notify_eligible(fam)
             except Exception:
                 pass
+        elif metrics.sharpe is not None and metrics.sharpe >= 1.0:
+            # v7.2.1: Near-passer — not eligible but promising enough to prevent
+            # premature epoch skip. These are refinement-worthy candidates.
+            try:
+                fam = candidate_row.get("family", "")
+                if hasattr(self.generator, "notify_near_passer"):
+                    self.generator.notify_near_passer(fam, metrics.sharpe)
+            except Exception:
+                pass
 
         sharpe_str = "None" if metrics.sharpe is None else f"{metrics.sharpe:.3f}"
         fitness_str = "None" if metrics.fitness is None else f"{metrics.fitness:.3f}"
@@ -2906,32 +2915,76 @@ class AlphaBot:
             print(f"[RECOVERED] restored {recovered} running simulations from storage")
 
     def mark_stale_runs_timed_out(self) -> None:
+        """v7.2.1: Fixed to check BOTH 'running' and 'submitted' status in DB,
+        AND also sweep the in-memory scheduler for sims that have been active
+        longer than the timeout. The original only queried status=running,
+        but stuck sims stay in status=submitted — so they were invisible."""
         cutoff = utc_now() - timedelta(minutes=config.SIM_TIMEOUT_MINUTES)
-        rows = self.storage.get_running_runs()
-
         stale_count = 0
-        for row in rows:
-            submitted_at = row["submitted_at"]
-            if not submitted_at:
-                continue
 
+        # Method 1: DB-based sweep (catches both statuses)
+        for status_val in ("running", "submitted"):
             try:
-                submitted_dt = self.storage.parse_dt(submitted_at)
+                rows = self.storage._get("runs", {
+                    "status": f"eq.{status_val}",
+                    "owner": f"eq.{self.storage.owner}",
+                    "select": "run_id,sim_id,submitted_at",
+                }) or []
             except Exception:
-                continue
+                rows = []
 
-            if submitted_dt < cutoff:
-                run_id = row["run_id"]
-                sim_id = row["sim_id"]
-                self.storage.update_run(
-                    run_id,
-                    status="timed_out",
-                    completed_at=utc_now(),
-                    error_message="Marked stale by timeout sweep.",
-                )
-                if sim_id:
-                    self.scheduler.remove(sim_id)
-                stale_count += 1
+            for row in rows:
+                submitted_at = row.get("submitted_at")
+                if not submitted_at:
+                    continue
+                try:
+                    submitted_dt = self.storage.parse_dt(submitted_at)
+                except Exception:
+                    continue
+                if submitted_dt < cutoff:
+                    run_id = row["run_id"]
+                    sim_id = row.get("sim_id")
+                    self.storage.update_run(
+                        run_id,
+                        status="timed_out",
+                        completed_at=utc_now(),
+                        error_message=f"Marked stale by timeout sweep (was {status_val}).",
+                    )
+                    if sim_id:
+                        self.scheduler.remove(sim_id)
+                    stale_count += 1
+
+        # Method 2: Scheduler-based sweep — catch anything the DB missed
+        # (e.g. if DB update succeeded but scheduler.remove didn't)
+        for sim_id, run_id in list(self.scheduler.active_items()):
+            try:
+                run_row = self.storage._get("runs", {
+                    "run_id": f"eq.{run_id}",
+                    "select": "status,submitted_at",
+                })
+                if run_row:
+                    r = run_row[0]
+                    if r.get("status") in ("timed_out", "completed", "failed"):
+                        # DB says done but scheduler still has it — orphaned slot
+                        self.scheduler.remove(sim_id)
+                        stale_count += 1
+                        continue
+                    sa = r.get("submitted_at")
+                    if sa:
+                        try:
+                            sa_dt = self.storage.parse_dt(sa)
+                            if sa_dt < cutoff:
+                                self.storage.update_run(
+                                    run_id, status="timed_out",
+                                    completed_at=utc_now(),
+                                    error_message="Stale sweep: scheduler orphan.",
+                                )
+                                self.scheduler.remove(sim_id)
+                                stale_count += 1
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
         if stale_count:
             print(f"[STALE_SWEEP] marked {stale_count} runs as timed_out")

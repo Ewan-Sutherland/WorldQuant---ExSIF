@@ -423,10 +423,11 @@ class CoordinatedSubmitPipeline:
         all_positive = []
         for owner in self.participating_owners:
             try:
+                min_score = getattr(self.config, "SUBMIT_MIN_SCORE", 15)
                 rows = self.storage._get("ready_alphas", {
                     "owner": f"eq.{owner}",
                     "status": "eq.ready",
-                    "score_change": "gt.0",
+                    "score_change": f"gte.{min_score}",
                     "order": "score_change.desc",
                 }) or []
                 for r in rows:
@@ -451,10 +452,28 @@ class CoordinatedSubmitPipeline:
 
         accepted = result.get("_accepted")
         if accepted:
+            # v7.2.1: Update ready_alphas status
             try:
                 self.storage._patch("ready_alphas", {"id": alpha["id"]}, {"status": "submitted"})
             except Exception:
                 pass
+            # v7.2.1: Insert into submissions table (was missing — only ready_alphas
+            # was patched, so warm-start never loaded these as passed cores and
+            # universe sweeper never queued them)
+            try:
+                from models import new_id, utc_now
+                self.storage.insert_submission(
+                    submission_id=new_id("sub"),
+                    candidate_id=alpha.get("candidate_id", ""),
+                    run_id=alpha.get("run_id", ""),
+                    submitted_at=utc_now(),
+                    submission_status="confirmed",
+                    message=f"coordinated_submit: score={alpha.get('score_change', '?')} "
+                            f"S={alpha.get('sharpe', 0):.2f} F={alpha.get('fitness', 0):.2f} "
+                            f"owner={alpha.get('_owner', self.owner)}",
+                )
+            except Exception as exc:
+                print(f"    ⚠️ insert_submission failed (alpha IS on WQ): {exc}")
             print(f"    ✅ ACCEPTED — score {alpha.get('score_change', '?')}")
             return True
         else:

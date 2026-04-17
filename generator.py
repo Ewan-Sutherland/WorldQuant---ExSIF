@@ -115,6 +115,8 @@ class AlphaGenerator:
         # v7.2.1: Reset saturation tracker for new epoch
         self._epoch_corr_fails = {}
         self._epoch_penalty_logged = set()
+        # v7.2.1: Near-passer count prevents premature epoch skip
+        self._epoch_near_passer_count = 0
         cats = self.EPOCH_SCHEDULE[self._epoch_index]
         print(f"[EPOCH] Window {self._epoch_index}/{len(self.EPOCH_SCHEDULE)-1}: "
               f"focusing on {cats}")
@@ -141,8 +143,12 @@ class AlphaGenerator:
             should_advance = True
 
         # Early skip: 0 eligible after threshold generations
+        # v7.2.1: Also count near-passers (S >= 1.0) — an epoch producing
+        # refinement-worthy candidates shouldn't be skipped just because
+        # nothing hit the 1.25 eligible threshold yet.
         if (self._epoch_gen_count >= self.EPOCH_SKIP_THRESHOLD
                 and self._epoch_eligible_count == 0
+                and getattr(self, "_epoch_near_passer_count", 0) < 3
                 and not self._epoch_skipped):
             self._epoch_skipped = True
             should_advance = True
@@ -161,6 +167,7 @@ class AlphaGenerator:
             # v7.2.1: Reset saturation tracker — fresh start per epoch
             self._epoch_corr_fails = {}
             self._epoch_penalty_logged = set()
+            self._epoch_near_passer_count = 0
             cats = self.EPOCH_SCHEDULE[self._epoch_index]
             print(f"[EPOCH] Advancing {old_idx} → {self._epoch_index}: now focusing on {cats}")
 
@@ -174,6 +181,12 @@ class AlphaGenerator:
         cat = self._FAMILY_TO_CATEGORY.get(family, "other")
         print(f"[EPOCH] Eligible #{self._epoch_eligible_count} in epoch {self._epoch_index} "
               f"(family={family}, category={cat})")
+
+    def notify_near_passer(self, family: str, sharpe: float):
+        """v7.2.1: Called by bot when a near-passer (S >= 1.0) is found.
+        Prevents premature epoch skip — if the epoch is producing refinable
+        candidates, it's worth staying even if nothing hit 1.25 yet."""
+        self._epoch_near_passer_count = getattr(self, "_epoch_near_passer_count", 0) + 1
 
     def get_epoch_state(self) -> dict:
         """Return epoch state for persistence."""
@@ -666,7 +679,8 @@ class AlphaGenerator:
     ]
     # After 8 epochs (4 days), cycle repeats — each category gets 2-4 windows per cycle
 
-    EPOCH_SKIP_THRESHOLD = 120     # Skip epoch early if 0 eligible after this many gens
+    EPOCH_SKIP_THRESHOLD = 400     # v7.2.1: Raised from 120 — was too aggressive, every epoch skipped.
+                                    # 400 generations ≈ 4-6 hours of runtime, giving the epoch a fair shot.
     EPOCH_EXTEND_THRESHOLD = 3     # Extend epoch if this many eligible found
 
     def _sample_family(self, bias):
@@ -925,6 +939,52 @@ class AlphaGenerator:
     # ============================
 
     def _post_process(self, expr, family=None, template_id=None, light=False, force_smoothing: bool = False):
+        # v7.2.1: Reject expressions that use grouping-only fields as value fields.
+        # pv13_5l_scibr / pv13_6l_scibr are GROUPING fields (used inside densify())
+        # but the LLM sometimes generates ts_backfill(pv13_5l_scibr, 60) which fails
+        # with "Incompatible unit: expected Unit[], found Unit[Group:1]".
+        _GROUP_ONLY_FIELDS = {"pv13_5l_scibr", "pv13_6l_scibr"}
+        for gf in _GROUP_ONLY_FIELDS:
+            if gf in expr and f"densify({gf})" not in expr:
+                # Field used outside densify() — reject by returning a known-safe no-op
+                # that will get low Sharpe and be harmlessly discarded
+                return expr.replace(gf, "close")  # Swap with a safe scalar field
+
+        # v7.2.1: Fix rank(x, y) → group_rank(x, y) when combiner accidentally
+        # carries a group arg into rank(). rank() takes exactly 1 input.
+        # Use simple string detection — regex can't handle nested parens reliably.
+        if ", densify(" in expr:
+            # Find bare rank(..., densify(...)) — not group_rank or ts_rank
+            import re
+            # Replace `rank(` immediately before a `, densify(` pattern at the same paren depth
+            # Simple heuristic: scan for `rank(` not preceded by [a-z_], then check if
+            # that rank call contains `, densify(` before its closing paren
+            result = []
+            i = 0
+            while i < len(expr):
+                # Check for bare `rank(` not preceded by alpha/underscore
+                if expr[i:i+5] == "rank(" and (i == 0 or not expr[i-1].isalpha() and expr[i-1] != "_"):
+                    # Find matching close paren
+                    depth = 1
+                    j = i + 5
+                    while j < len(expr) and depth > 0:
+                        if expr[j] == "(":
+                            depth += 1
+                        elif expr[j] == ")":
+                            depth -= 1
+                        j += 1
+                    chunk = expr[i:j]
+                    # Check for densify at depth 1 (direct arg, not nested)
+                    if ", densify(" in chunk:
+                        result.append("group_" + chunk)
+                    else:
+                        result.append(chunk)
+                    i = j
+                else:
+                    result.append(expr[i])
+                    i += 1
+            expr = "".join(result)
+
         if expr.count("rank(") >= 3 or expr.count("ts_mean(") >= 3 or expr.count("ts_decay_linear(") >= 2:
             return expr
 

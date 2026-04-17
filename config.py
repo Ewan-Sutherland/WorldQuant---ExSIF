@@ -58,7 +58,7 @@ MAX_TURNOVER = 0.70
 NEAR_PASSER_MIN_SHARPE = 1.20
 NEAR_PASSER_MIN_FITNESS = 0.65
 NEAR_PASSER_MAX_TURNOVER = 0.75
-REFINEMENT_PROBABILITY = 0.40  # v7.2: explore more fresh research templates, refine less
+REFINEMENT_PROBABILITY = 0.50  # v7.2.1: 50/50 refine vs fresh (was 0.40)
 
 MIN_REFINEMENT_SHARPE = 0.95
 FRONTIER_MIN_SHARPE = 0.95
@@ -117,7 +117,7 @@ SUBMIT_SCHEDULE = {
 }
 SUBMIT_MINUTE = 30  # Fire at :30 past the hour
 # Minimum score change to auto-submit (avoids marginal alphas flipping negative)
-SUBMIT_MIN_SCORE = 20
+SUBMIT_MIN_SCORE = 15  # v7.2.1: Lowered from 20 — low-positive alphas stay in ready_alphas and can grow after other submissions shift the portfolio
 
 # v6.2: Number of Optuna settings variants to try per eligible alpha
 OPTIMIZE_VARIANTS = 5

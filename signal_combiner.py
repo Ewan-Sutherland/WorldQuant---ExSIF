@@ -139,6 +139,52 @@ class SignalCombiner:
                 key=lambda x: x.get("fitness", 0) * 0.6 + x["sharpe"] * 0.4, reverse=True,
             )
 
+        # v7.2.1: Load portfolio-POSITIVE ready_alphas as high-priority seeds.
+        # These are expressions verified by before-after to actually help the team
+        # score. Any bot that found one shares it via Supabase, so all bots benefit.
+        # Weight them heavily — portfolio-verified signal > raw Sharpe.
+        try:
+            positive_rows = self.storage._get("ready_alphas", {
+                "score_change": "gt.0",
+                "status": "in.(ready,submitted)",
+                "select": "expression,sharpe,fitness,score_change",
+                "order": "score_change.desc",
+                "limit": "30",
+            }) or []
+            added = 0
+            for row in positive_rows:
+                expr = row.get("expression", "")
+                if not expr:
+                    continue
+                # Check field compatibility
+                try:
+                    from datasets import expression_uses_valid_fields
+                    if not expression_uses_valid_fields(expr):
+                        continue
+                except Exception:
+                    pass
+                category = classify_expression(expr)
+                if category == "unknown":
+                    continue
+                entry = {
+                    "expression": expr,
+                    "sharpe": float(row.get("sharpe", 0) or 0),
+                    "fitness": float(row.get("fitness", 0) or 0),
+                    "category": category,
+                    "_portfolio_positive": True,
+                    "_score_change": float(row.get("score_change", 0) or 0),
+                }
+                if category not in self._near_passers_by_category:
+                    self._near_passers_by_category[category] = []
+                # Insert at front — these are the BEST seeds because they're
+                # verified portfolio-positive, not just high individual Sharpe
+                self._near_passers_by_category[category].insert(0, entry)
+                added += 1
+            if added:
+                print(f"[COMBINER] Loaded {added} portfolio-positive seeds from ready_alphas")
+        except Exception as exc:
+            pass  # Don't crash combiner if ready_alphas query fails
+
         total = sum(len(v) for v in self._near_passers_by_category.values())
         cats = list(self._near_passers_by_category.keys())
         print(
