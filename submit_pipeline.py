@@ -66,9 +66,9 @@ class SubmitPipeline:
         print("  Re-checking scores for all alphas...")
         alphas = self._recheck_scores(alphas)
 
-        # Step 3: Drop negatives
+        # Step 3: Drop truly negative scores (< -10), keep marginal (-10 to 0) for recheck
         positive = [a for a in alphas if a.get("live_score") is not None and a["live_score"] >= self.MIN_SCORE_TO_SUBMIT]
-        negative = [a for a in alphas if a.get("live_score") is not None and a["live_score"] < 0]
+        truly_negative = [a for a in alphas if a.get("live_score") is not None and a["live_score"] < -10]
         unknown = [a for a in alphas if a.get("live_score") is None]
 
         # v7.2: Retry unknowns once after a pause — API can be intermittent
@@ -93,8 +93,8 @@ class SubmitPipeline:
                               f"S={a.get('sharpe',0):.2f} → score: {direction}{score}")
                         if score >= self.MIN_SCORE_TO_SUBMIT:
                             positive.append(a)
-                        elif score < 0:
-                            negative.append(a)
+                        elif score < -10:
+                            truly_negative.append(a)
                     else:
                         still_unknown.append(a)
                 except Exception:
@@ -102,14 +102,14 @@ class SubmitPipeline:
                 time.sleep(3)
             unknown = still_unknown
 
-        print(f"\n  After re-check: {len(positive)} positive, {len(negative)} negative, {len(unknown)} unknown")
+        print(f"\n  After re-check: {len(positive)} positive, {len(truly_negative)} truly negative, {len(unknown)} unknown")
 
-        for a in negative:
+        for a in truly_negative:
             self._mark_status(a, "rejected", f"negative_score={a['live_score']}")
 
         # Step 4: Greedy loop — submit highest, re-check all, repeat
         submitted = 0
-        rejected = len(negative)
+        rejected = len(truly_negative)
         remaining = list(positive)
 
         while remaining:
@@ -133,9 +133,9 @@ class SubmitPipeline:
                     print(f"\n  Re-checking {len(remaining)} remaining alphas...")
                     remaining = self._recheck_scores(remaining)
 
-                    # Drop anything that went negative or unknown
+                    # Drop anything that went truly negative (< -10)
                     for a in remaining:
-                        if a.get("live_score") is not None and a["live_score"] < 0:
+                        if a.get("live_score") is not None and a["live_score"] < -10:
                             self._mark_status(a, "rejected", f"went_negative={a['live_score']}")
                             rejected += 1
 

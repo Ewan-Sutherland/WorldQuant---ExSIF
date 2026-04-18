@@ -230,9 +230,14 @@ class AlphaBot:
                         self.core_signal_exhausted = counters["core_signal_exhausted"]
                     if counters.get("family_template_exhausted"):
                         self.family_template_exhausted = counters["family_template_exhausted"]
-                    # v7.1: Restore score-blocked cores and swept pairs
+                    # v7.2.1: Do NOT restore score_negative_cores.
+                    # Portfolio shifts with each submission, so blocks from
+                    # previous sessions are stale. A core that scored -30 last
+                    # week might score +40 now. Let them accumulate fresh
+                    # during this session only.
                     if counters.get("score_negative_cores"):
-                        self._score_negative_cores = set(counters["score_negative_cores"])
+                        stale_count = len(counters["score_negative_cores"])
+                        print(f"[WARM_START] Skipped {stale_count} stale score-blocked cores (portfolio has shifted)")
                     if counters.get("swept_keys") and hasattr(self, "universe_sweeper"):
                         prev_swept = len(self.universe_sweeper._swept)
                         self.universe_sweeper._swept.update(counters["swept_keys"])
@@ -1499,7 +1504,11 @@ class AlphaBot:
         else:
             # No positive change found
             unknown = [v for v in variants if v["change"] is None]
-            negative = [v for v in variants if v["change"] is not None and v["change"] < 0]
+            # v7.2.1: Split negatives into "marginal" (-10 to 0) and "truly negative" (< -10).
+            # Marginal alphas stay in ready_alphas — portfolio shifts after other submissions
+            # might push them positive. Only truly negative cores get blocked.
+            marginal = [v for v in variants if v["change"] is not None and -10 <= v["change"] < 0]
+            truly_negative = [v for v in variants if v["change"] is not None and v["change"] < -10]
 
             if unknown:
                 # v7.2.1: Stage ALL unknown variants, not just the best.
@@ -1537,9 +1546,39 @@ class AlphaBot:
                     f"as 'unverified' (best S={best_unk['sharpe']:.2f} F={best_unk['fitness']:.2f}).\n"
                     f"{'='*60}\n"
                 )
-            elif negative:
+            elif marginal:
+                # Stage marginal negatives — they might flip positive after portfolio shifts
+                staged_count = 0
+                for mv in marginal:
+                    try:
+                        self.storage.insert_ready_alpha(
+                            candidate_id=mv["candidate_id"],
+                            run_id=mv["run_id"],
+                            alpha_id=mv["alpha_id"],
+                            expression=expression,
+                            core_signal=core or "",
+                            family=family,
+                            template_id=candidate_row.get("template_id", ""),
+                            sharpe=mv["sharpe"],
+                            fitness=mv["fitness"],
+                            turnover=metrics.turnover,
+                            score_before=mv.get("before"),
+                            score_after=mv.get("after"),
+                            score_change=mv["change"],
+                            settings_json=mv.get("settings_json", "{}"),
+                            variant_desc=mv["desc"] + " (marginal)",
+                        )
+                        staged_count += 1
+                    except Exception:
+                        pass
                 print(
-                    f"\n  📉 ALL {len(negative)} variants would hurt score — skipping.\n"
+                    f"\n  📉 {len(marginal)} marginal variant(s) ({marginal[0]['change']:+.0f} to "
+                    f"{marginal[-1]['change']:+.0f}) — staged {staged_count} for recheck.\n"
+                    f"{'='*60}\n"
+                )
+            elif truly_negative:
+                print(
+                    f"\n  📉 ALL {len(truly_negative)} variants scored < -10 — skipping.\n"
                     f"{'='*60}\n"
                 )
                 # v6.2: Block further refinement of this core — it hurts the portfolio

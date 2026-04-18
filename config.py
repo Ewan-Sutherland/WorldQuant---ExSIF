@@ -535,17 +535,21 @@ LLM_AST_RETRY_MAX = 1      # v6.1: retry failed expressions once with error feed
 # teammates' ready alphas so you can manually submit on their behalf.
 # Toggle off once they can check scores independently.
 # ═══════════════════════════════════════════════════════════════
-CHECK_TEAMMATE_SCORES = True  # v7.2: Re-simulates through own credentials, checks top 10 per teammate
-TEAMMATE_OWNERS = [
-    "tns203@exeter.ac.uk",
-    "lucacroci2005@gmail.com",
-]
+CHECK_TEAMMATE_SCORES = False  # v7.2.1: Luca now handled by proxy scoring in coordinated pipeline
+TEAMMATE_OWNERS = []  # v7.2.1: All teammates now in coordinated pipeline
 
 # ── Coordinated Team Submission ──────────────────────────────────
 # Which bots participate in coordinated submission (can check own scores)
 COORDINATED_SUBMIT_OWNERS = [
     "ewansutherland@icloud.com",
     "gmpc201@exeter.ac.uk",
+    "tns203@exeter.ac.uk",       # v7.2.1: Tom can now check own scores
+    "lucacroci2005@gmail.com",   # v7.2.1: Luca participates but scores checked by coordinator
+]
+# v7.2.1: Owners whose scores are checked BY THE COORDINATOR (can't check own)
+# These bots skip Phase 1 (score checking) and just wait for submit commands.
+PROXY_SCORE_OWNERS = [
+    "lucacroci2005@gmail.com",
 ]
 # Only the coordinator ranks globally and orchestrates
 IS_COORDINATOR = True  # Ewan's config = True, team config = False

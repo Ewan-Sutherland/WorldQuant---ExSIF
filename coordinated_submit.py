@@ -156,7 +156,8 @@ class CoordinatedSubmitPipeline:
             # Write score to Supabase so coordinator can read it
             try:
                 new_status = "ready" if score is not None and score >= 0 else (
-                    "rejected" if score is not None and score < 0 else "unverified"
+                    "rejected" if score is not None and score < -10 else
+                    "ready" if score is not None else "unverified"
                 )
                 self.storage._patch("ready_alphas", {"id": a["id"]}, {
                     "score_change": score,
@@ -185,7 +186,7 @@ class CoordinatedSubmitPipeline:
                         a["live_score"] = score
                         self.storage._patch("ready_alphas", {"id": a["id"]}, {
                             "score_change": score,
-                            "status": "ready" if score >= 0 else "rejected",
+                            "status": "ready" if score >= -10 else "rejected",
                         })
                         print(f"    ✅ {a.get('family','')} S={a.get('sharpe',0):.2f} → {score:+.0f}")
                 except Exception:
@@ -203,6 +204,16 @@ class CoordinatedSubmitPipeline:
         print(f"  Window: {self.window_id}")
         print(f"  Role: {'COORDINATOR' if self.is_coordinator else 'PARTICIPANT'}")
         print(f"{'='*60}\n")
+
+        # v7.2.1: Proxy score owners (Luca) can't check own scores —
+        # skip Phase 1 and go straight to participant mode.
+        proxy_owners = getattr(self.config, "PROXY_SCORE_OWNERS", [])
+        if self.owner in proxy_owners:
+            print("  ── Proxy mode: scores will be checked by coordinator ──")
+            self._send_signal("scores_ready", payload={
+                "count": 0, "positive": 0, "proxy": True,
+            })
+            return self._run_participant()
 
         # Phase 1: Check own scores
         print("  ── Phase 1: Checking own scores ──")
@@ -229,14 +240,26 @@ class CoordinatedSubmitPipeline:
         # Phase 2: Wait for other bots
         print("  ── Phase 2: Waiting for other bots ──")
         other_owners = [o for o in self.participating_owners if o != self.owner]
+        proxy_owners = set(getattr(self.config, "PROXY_SCORE_OWNERS", []))
 
         for other in other_owners:
             sig = self._wait_for_signal("scores_ready", from_owner=other)
             if sig:
                 payload = json.loads(sig.get("payload", "{}")) if sig.get("payload") else {}
-                print(f"    ✅ {other}: {payload.get('positive', '?')} positive ready")
+                if payload.get("proxy"):
+                    print(f"    ✅ {other}: proxy mode — will check scores now")
+                else:
+                    print(f"    ✅ {other}: {payload.get('positive', '?')} positive ready")
             else:
                 print(f"    ⚠️ {other}: timed out — proceeding without")
+
+        # v7.2.1: Check proxy owners' scores using coordinator's credentials
+        # This replaces the old TeammateScoreChecker — integrated into the pipeline
+        # so proxy alphas participate in global ranking and recheck loop.
+        for proxy in proxy_owners:
+            if proxy in [o for o in self.participating_owners]:
+                print(f"\n  ── Checking scores for proxy: {proxy} ──")
+                self._check_proxy_scores(proxy)
 
         # Small delay to ensure DB writes have propagated
         time.sleep(3)
@@ -303,6 +326,11 @@ class CoordinatedSubmitPipeline:
             print(f"  Re-checking scores after round {round_num}...")
             self._send_signal("recheck", round_num=round_num)
             self._recheck_own_positive()
+
+            # v7.2.1: Also recheck proxy owners' scores (portfolio shifted)
+            for proxy in proxy_owners:
+                if proxy in [o for o in self.participating_owners]:
+                    self._recheck_proxy_scores(proxy)
 
             # Wait for other bots to finish rechecking
             for other in other_owners:
@@ -505,10 +533,171 @@ class CoordinatedSubmitPipeline:
                 if score is not None:
                     self.storage._patch("ready_alphas", {"id": a["id"]}, {
                         "score_change": score,
-                        "status": "ready" if score >= 0 else "rejected",
+                        "status": "ready" if score >= -10 else "rejected",
                     })
                     direction = "+" if score > 0 else ""
                     print(f"    {a.get('family','')}/{a.get('template_id','')} "
+                          f"S={a.get('sharpe',0):.2f} → {direction}{score:.0f}")
+            except Exception:
+                pass
+            time.sleep(2)
+
+    def _check_proxy_scores(self, proxy_owner: str) -> None:
+        """Check scores for a proxy owner by re-simulating through coordinator's credentials.
+
+        v7.2.1: Luca can't check his own scores. The coordinator re-simulates
+        his expressions, gets fresh alpha_ids, and checks before-after scores.
+        Results are written back to ready_alphas (keeping Luca as owner).
+        """
+        try:
+            alphas = self.storage._get("ready_alphas", {
+                "owner": f"eq.{proxy_owner}",
+                "status": "in.(ready,unverified)",
+                "select": "*",
+                "order": "sharpe.desc",
+            }) or []
+        except Exception as exc:
+            print(f"    ERROR loading {proxy_owner} alphas: {exc}")
+            return
+
+        if not alphas:
+            print(f"    No ready/unverified alphas for {proxy_owner}")
+            return
+
+        print(f"    Checking {len(alphas)} alphas for {proxy_owner}...")
+
+        # Track coordinator alpha_ids for rechecks later
+        if not hasattr(self, "_proxy_alpha_map"):
+            self._proxy_alpha_map = {}
+
+        for i, a in enumerate(alphas):
+            expr = a.get("expression", "")
+            settings_raw = a.get("settings_json", "{}")
+
+            if not expr:
+                continue
+
+            if isinstance(settings_raw, str):
+                try:
+                    settings = json.loads(settings_raw)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            else:
+                settings = settings_raw or {}
+
+            if not settings:
+                continue
+
+            # Re-simulate through coordinator's credentials
+            try:
+                sim_id = self.client.submit_simulation(expr, settings)
+            except Exception as exc:
+                if "429" in str(exc) or "CONCURRENT" in str(exc).upper():
+                    time.sleep(10)
+                    try:
+                        sim_id = self.client.submit_simulation(expr, settings)
+                    except Exception:
+                        continue
+                else:
+                    continue
+
+            # Poll for completion
+            deadline = time.time() + 180
+            result = None
+            while time.time() < deadline:
+                try:
+                    r = self.client.poll_simulation(sim_id)
+                    if r.get("status") in ("completed", "failed", "timed_out"):
+                        result = r
+                        break
+                except Exception:
+                    pass
+                time.sleep(5)
+
+            if not result or result.get("status") != "completed":
+                continue
+
+            # Get coordinator's alpha_id
+            coord_alpha_id = None
+            try:
+                raw = result.get("alpha_id", "")
+                if raw:
+                    coord_alpha_id = str(raw).rstrip("/").split("/")[-1]
+            except Exception:
+                pass
+
+            if not coord_alpha_id:
+                continue
+
+            # Store mapping for rechecks
+            proxy_alpha_id = a.get("alpha_id", "")
+            if proxy_alpha_id:
+                self._proxy_alpha_map[proxy_alpha_id] = coord_alpha_id
+
+            # Check before-after score
+            score = None
+            for attempt in range(2):
+                try:
+                    perf = self.client.check_before_after_performance(
+                        coord_alpha_id, competition_id=self.config.IQC_COMPETITION_ID,
+                    )
+                    score = perf.get("_score_change")
+                    if score is not None:
+                        break
+                except Exception:
+                    pass
+                if attempt < 1:
+                    time.sleep(3)
+
+            if score is not None:
+                direction = "📈" if score > 0 else "📉" if score < 0 else "➡️"
+                print(f"    [{i+1}/{len(alphas)}] {direction} {a.get('family','')} "
+                      f"S={a.get('sharpe',0):.2f} → {score:+.0f}")
+                try:
+                    self.storage._patch("ready_alphas", {"id": a["id"]}, {
+                        "score_change": score,
+                        "status": "ready" if score >= -10 else "rejected",
+                    })
+                except Exception:
+                    pass
+            else:
+                print(f"    [{i+1}/{len(alphas)}] ❓ {a.get('family','')} "
+                      f"S={a.get('sharpe',0):.2f} → score unavailable")
+
+            time.sleep(2)
+
+    def _recheck_proxy_scores(self, proxy_owner: str) -> None:
+        """Quick re-check of proxy owner's positive alphas using cached coordinator alpha_ids."""
+        proxy_map = getattr(self, "_proxy_alpha_map", {})
+        if not proxy_map:
+            return
+
+        try:
+            rows = self.storage._get("ready_alphas", {
+                "owner": f"eq.{proxy_owner}",
+                "status": "eq.ready",
+                "order": "score_change.desc",
+            }) or []
+        except Exception:
+            return
+
+        for a in rows:
+            proxy_alpha_id = a.get("alpha_id", "")
+            coord_alpha_id = proxy_map.get(proxy_alpha_id)
+            if not coord_alpha_id:
+                continue
+            try:
+                perf = self.client.check_before_after_performance(
+                    coord_alpha_id, competition_id=self.config.IQC_COMPETITION_ID,
+                )
+                score = perf.get("_score_change")
+                if score is not None:
+                    self.storage._patch("ready_alphas", {"id": a["id"]}, {
+                        "score_change": score,
+                        "status": "ready" if score >= -10 else "rejected",
+                    })
+                    direction = "+" if score > 0 else ""
+                    print(f"    [proxy] {a.get('family','')}/{a.get('template_id','')} "
                           f"S={a.get('sharpe',0):.2f} → {direction}{score:.0f}")
             except Exception:
                 pass
