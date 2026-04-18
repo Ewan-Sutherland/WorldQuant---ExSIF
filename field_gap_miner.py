@@ -195,23 +195,51 @@ class FieldGapMiner:
         self._compute_gap()
 
     def _load_portfolio_fields(self) -> None:
-        """Extract all fields used in submitted alphas."""
+        """Extract all fields used in submitted alphas — TEAM-WIDE.
+        
+        Self-correlation is team-wide, so a field used by ANY teammate's
+        submission is saturated for ALL bots.
+        """
         self._portfolio_fields = set()
-        if self.storage is None:
-            return
-        try:
-            rows = self.storage.get_submitted_candidate_rows(limit=300)
-            for row in rows:
-                expr = row.get("canonical_expression", "")
-                self._portfolio_fields.update(extract_fields_from_expr(expr))
-        except Exception as exc:
-            print(f"[GAP_MINER] Failed to load portfolio fields: {exc}")
+        if self.storage is not None:
+            try:
+                # Use ALL team submissions, not just this owner's
+                if hasattr(self.storage, 'get_all_team_submissions'):
+                    rows = self.storage.get_all_team_submissions(limit=500)
+                else:
+                    rows = self.storage.get_submitted_candidate_rows(limit=300)
+                for row in rows:
+                    expr = row.get("canonical_expression", "")
+                    self._portfolio_fields.update(extract_fields_from_expr(expr))
+            except Exception as exc:
+                print(f"[GAP_MINER] Failed to load portfolio fields: {exc}")
 
-        # Also add commonly saturated fields even if not in DB
-        # (manual submissions with null expressions)
+        # Always include commonly saturated fields even if not in DB
+        # (manual submissions with null expressions, or missing JOIN partners)
+        # This is the complete set from our portfolio analysis of 108 submissions.
         self._portfolio_fields.update({
+            # price_volume basics — always correlated
             'returns', 'close', 'cap', 'adv20', 'volume', 'vwap', 'open',
-            'high', 'low', 'sharesout',  # price_volume basics always correlated
+            'high', 'low', 'sharesout',
+            # Fields confirmed in portfolio from 93 expressions
+            'implied_volatility_call_120', 'parkinson_volatility_120',
+            'operating_income', 'debt', 'nws12_afterhsz_sl',
+            'rel_ret_comp', 'est_eps', 'implied_volatility_put_120', 'assets',
+            'implied_volatility_put_30', 'implied_volatility_call_30',
+            'fn_liab_fair_val_l1_a', 'rp_ess_revenue',
+            'implied_volatility_call_270', 'implied_volatility_put_270', 'pcr_oi_270',
+            'fn_oth_income_loss_fx_transaction_and_tax_translation_adj_a',
+            'scl12_alltype_buzzvec', 'rp_css_earnings', 'liabilities',
+            'historical_volatility_20', 'news_pct_1min', 'news_max_up_ret',
+            'one_year_change_total_assets', 'rp_ess_mna', 'rp_ess_legal',
+            'snt_buzz_ret', 'snt1_d1_earningssurprise', 'snt1_d1_netearningsrevision',
+            'rel_ret_cust', 'est_fcf', 'est_ptp', 'equity', 'eps', 'sales',
+            'cashflow', 'cashflow_op', 'cogs', 'revenue', 'enterprise_value',
+            'cash_burn_rate', 'rp_css_insider', 'rp_ess_insider', 'rp_ess_ratings',
+            'pv13_com_page_rank', 'est_dividend_ps', 'capex', 'rp_ess_product',
+            'sales_ps', 'income', 'earnings_momentum_composite_score',
+            'historical_volatility_60', 'implied_volatility_call_60',
+            'historical_volatility_20',
         })
         print(f"[GAP_MINER] Portfolio uses {len(self._portfolio_fields)} fields")
 
