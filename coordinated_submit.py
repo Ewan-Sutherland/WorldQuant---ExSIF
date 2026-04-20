@@ -352,23 +352,31 @@ class CoordinatedSubmitPipeline:
                 except Exception:
                     pass
 
-            # Re-check scores across all bots
-            print(f"  Re-checking scores after round {round_num}...")
-            self._send_signal("recheck", round_num=round_num)
-            self._recheck_own_positive()
+            # Only re-check scores if we ACTUALLY submitted something.
+            # If the submission failed (self-correlation, CW, etc.), nothing hit
+            # the WQ portfolio so scores are still accurate. Skipping here saves
+            # ~40-60s per failed round across all 4 bots, and avoids wasting
+            # submission-window time on pointless API calls.
+            if success:
+                print(f"  Re-checking scores after round {round_num}...")
+                self._send_signal("recheck", round_num=round_num)
+                self._recheck_own_positive()
 
-            # v7.2.1: Also recheck proxy owners' scores (portfolio shifted)
-            for proxy in proxy_owners:
-                if proxy in [o for o in self.participating_owners]:
-                    self._recheck_proxy_scores(proxy)
+                # Also recheck proxy owners' scores (portfolio shifted)
+                for proxy in proxy_owners:
+                    if proxy in [o for o in self.participating_owners]:
+                        self._recheck_proxy_scores(proxy)
 
-            # Wait for other bots to finish rechecking.
-            # _recheck_own_positive takes ~2s/alpha × ~20 alphas = ~40-60s per bot,
-            # so 180s gives comfortable margin even with slow API.
-            for other in other_owners:
-                self._wait_for_signal("recheck_done", from_owner=other,
-                                      round_num=round_num, timeout=180)
-            time.sleep(2)
+                # Wait for other bots to finish rechecking.
+                # _recheck_own_positive takes ~2s/alpha × ~20 alphas = ~40-60s per bot,
+                # so 180s gives comfortable margin even with slow API.
+                for other in other_owners:
+                    self._wait_for_signal("recheck_done", from_owner=other,
+                                          round_num=round_num, timeout=180)
+                time.sleep(2)
+            else:
+                print(f"  Skipping recheck (submission failed, no portfolio shift)")
+                time.sleep(1)
 
         # Signal done so participants stop waiting
         self._send_signal("done")
