@@ -319,25 +319,26 @@ class AlphaGenerator:
                     return True
 
         # === STRUCTURAL SATURATION CHECK ===
-        # Pattern 1: "rank(ts_backfill(...)) * rank(-returns)" or its swap
-        # Already ~24% of portfolio. Reject 75% of the time.
-        # Permissive regex: catches "rank(X) * rank(-returns)" where X contains ts_backfill
+        # These shapes dominate the existing portfolio but ARE still landing
+        # positive alphas (just at lower rates than before). Don't choke them
+        # off — softly reduce their share so other shapes get airtime.
+        # Pattern 1: "rank(ts_backfill(...)) * rank(-returns)" — ~24% of portfolio
         import re
         has_backfill_returns = (
             re.search(r'rank\([^)]*ts_backfill[^)]+\)[^*+]*\*[^*+]*rank\(-returns\)', expr_l) is not None
             or re.search(r'rank\(-returns\)[^*+]*\*[^*+]*rank\([^)]*ts_backfill', expr_l) is not None
         )
-        if has_backfill_returns and self.rng.random() < 0.75:
+        if has_backfill_returns and self.rng.random() < 0.40:
             return True
 
-        # Pattern 2: "ts_corr of ranks" — already ~10% of portfolio. Reject 60%.
+        # Pattern 2: "ts_corr of ranks" — ~10% of portfolio, still productive
         has_ts_corr_ranks = re.search(r'ts_corr\(\s*rank\([^)]+\)\s*,\s*rank\(', expr_l) is not None
-        if has_ts_corr_ranks and self.rng.random() < 0.60:
+        if has_ts_corr_ranks and self.rng.random() < 0.25:
             return True
 
         # Pattern 3: bare "rank(field) * rank(-returns)" — common gap mining shape
         has_bare_rank_returns = re.search(r'rank\([^)(]+\)\s*\*\s*rank\(-returns\)', expr_l) is not None
-        if has_bare_rank_returns and self.rng.random() < 0.50:
+        if has_bare_rank_returns and self.rng.random() < 0.30:
             return True
 
         return False
