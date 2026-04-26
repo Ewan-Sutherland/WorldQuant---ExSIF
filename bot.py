@@ -141,15 +141,21 @@ class AlphaBot:
         # v6.2.1: Universe sweeper — test eligible alphas on all universes
         self.universe_sweeper = UniverseSweeper(storage, client)
 
-        # v7.2.1: Field gap miner — systematically mines unused fields
-        try:
-            from field_gap_miner import FieldGapMiner
-            self.gap_miner = FieldGapMiner(storage, rng=self.generator.rng)
-            self.gap_miner.refresh()
-            self._gap_refresh_interval = 100  # Re-scan portfolio every 100 completions
-        except Exception as exc:
+        # v7.2.6: Field gap miner is available but disabled by default.
+        # We keep it off to refocus sims on broad template exploration instead of unused-field mining.
+        if getattr(config, "ENABLE_GAP_MINER", False):
+            try:
+                from field_gap_miner import FieldGapMiner
+                self.gap_miner = FieldGapMiner(storage, rng=self.generator.rng)
+                self.gap_miner.refresh()
+                self._gap_refresh_interval = 100  # Re-scan portfolio every 100 completions
+            except Exception as exc:
+                self.gap_miner = None
+                print(f"[GAP_MINER] Not available: {exc}")
+        else:
             self.gap_miner = None
-            print(f"[GAP_MINER] Not available: {exc}")
+            self._gap_refresh_interval = 0
+            print("[GAP_MINER] Disabled — exploration mode")
 
         # v6.0.1: Warm-start session state from database — persists across restarts & team members
         self._warm_start_from_history()
@@ -533,8 +539,8 @@ class AlphaBot:
             if status == "completed":
                 self._handle_completed(run_id, result)
 
-            elif status == "failed":
-                error_message = result.get("error_message", "Simulation failed")
+            elif status in {"failed", "fail", "error"}:
+                error_message = result.get("error_message", f"Simulation failed with status={status}")
                 self.storage.update_run(
                     run_id,
                     status="failed",
@@ -1185,6 +1191,7 @@ class AlphaBot:
                     suggestion.get("neutralization"),
                     suggestion.get("decay"),
                     suggestion.get("truncation"),
+                    suggestion.get("delay", 1),
                 )
                 if combo_key in tried_combos:
                     continue
@@ -1201,7 +1208,8 @@ class AlphaBot:
                 desc = (
                     f"{suggestion.get('universe','?')}/"
                     f"{suggestion.get('neutralization','?')}/"
-                    f"d{suggestion.get('decay','?')}/"
+                    f"decay{suggestion.get('decay','?')}/"
+                    f"delay{suggestion.get('delay',1)}/"
                     f"t{suggestion.get('truncation','?')}"
                 )
                 pending_variants.append((desc, variant_settings))
@@ -2288,10 +2296,28 @@ class AlphaBot:
         ):
             self.gap_miner.refresh()
 
-        # v7.2.1: FIELD GAP MINING — primary generation method in sprint mode.
-        # 65% of fresh candidates use unused fields in proven patterns.
-        # This is the highest-leverage path: every positive-scoring alpha
-        # used a field NOT in the portfolio.
+
+        # v7.2.4: Dedicated Delay-0 mini-universe. This runs before gap/combo/evolver
+        # and uses only Delay-0 specialist templates. It avoids mixing delay regimes.
+        if (
+            getattr(config, "DELAY0_ENABLED", False)
+            and self.generator.rng.random() < getattr(config, "DELAY0_TEMPLATE_PROBABILITY", 0.0)
+        ):
+            candidate = self.generator.generate_delay0_candidate(
+                family_bias=family_bias,
+                template_bias=template_bias,
+                settings_bias=settings_bias,
+            )
+            if candidate is not None:
+                print(
+                    f"[DELAY0_CANDIDATE] family={candidate.family} template={candidate.template_id} "
+                    f"univ={candidate.settings.universe} neut={candidate.settings.neutralization} "
+                    f"decay={candidate.settings.decay} expr={candidate.expression[:90]}"
+                )
+                return candidate
+
+        # v7.2.6: FIELD GAP MINING — currently disabled for exploration mode.
+        # Can be re-enabled in config.py via ENABLE_GAP_MINER=True and GAP_MINING_PROBABILITY>0.
         gap_prob = getattr(config, "GAP_MINING_PROBABILITY", 0.0)
         if (
             self.gap_miner is not None
@@ -2458,7 +2484,10 @@ class AlphaBot:
 
         # Create candidate from the raw expression
         try:
-            candidate = self.generator.create_from_expression(expr, settings_bias=settings_bias)
+            candidate = self.generator.create_from_expression(
+                expr, settings_bias=settings_bias,
+                allow_delay0=getattr(config, "LLM_ALLOW_DELAY0", False),
+            )
         except Exception as exc:
             print(f"[LLM_CANDIDATE_ERROR] expr={expr[:80]} error={exc}")
             return None
@@ -2466,6 +2495,12 @@ class AlphaBot:
         # Check for duplicates
         if self.storage.candidate_exists(candidate.expression_hash):
             print(f"[LLM_DUP] expr={expr[:80]} — already exists")
+            return None
+
+        # v7.2.6: Check saturation - reject if expression uses 2+ saturated fields.
+        # These almost always score negative against the existing portfolio.
+        if self.generator._is_oversaturated(candidate.expression):
+            print(f"[LLM_SATURATED] expr={expr[:80]} — uses 2+ portfolio-saturated fields")
             return None
 
         # Check concentrated weight blacklist
@@ -2501,7 +2536,10 @@ class AlphaBot:
             return None
 
         try:
-            candidate = self.generator.create_from_expression(expr, settings_bias=settings_bias)
+            candidate = self.generator.create_from_expression(
+                expr, settings_bias=settings_bias,
+                allow_delay0=getattr(config, "COMBINER_ALLOW_DELAY0", False),
+            )
         except Exception as exc:
             print(f"[COMBO_CANDIDATE_ERROR] expr={expr[:80]} error={exc}")
             return None
@@ -2509,6 +2547,11 @@ class AlphaBot:
         # Dedup check
         if self.storage.candidate_exists(candidate.expression_hash):
             print(f"[COMBO_DUP] expr={expr[:80]}")
+            return None
+
+        # v7.2.6: Saturation check
+        if self.generator._is_oversaturated(candidate.expression):
+            print(f"[COMBO_SATURATED] expr={expr[:80]}")
             return None
 
         # CW blacklist check
@@ -2539,13 +2582,21 @@ class AlphaBot:
             return None
 
         try:
-            candidate = self.generator.create_from_expression(expr, settings_bias=settings_bias)
+            candidate = self.generator.create_from_expression(
+                expr, settings_bias=settings_bias,
+                allow_delay0=getattr(config, "EVOLVER_ALLOW_DELAY0", False),
+            )
         except Exception as exc:
             print(f"[EVOLVE_CANDIDATE_ERROR] expr={expr[:80]} error={exc}")
             return None
 
         if self.storage.candidate_exists(candidate.expression_hash):
             print(f"[EVOLVE_DUP] expr={expr[:80]}")
+            return None
+
+        # v7.2.6: Saturation check
+        if self.generator._is_oversaturated(candidate.expression):
+            print(f"[EVOLVE_SATURATED] expr={expr[:80]}")
             return None
 
         if candidate.canonical_expression in self.concentrated_weight_exprs:
@@ -2586,6 +2637,11 @@ class AlphaBot:
 
         if candidate.canonical_expression in self.concentrated_weight_exprs:
             return None
+
+        # v7.2.6: Saturation check — gap mining shouldn't combine new fields with
+        # already-saturated ones (e.g. ts_backfill(novel_field, 60) * rank(operating_income))
+        if self.generator._is_oversaturated(candidate.expression):
+            return None  # Silent skip
 
         # Override family/template to track gap mining performance
         candidate.family = result["family"]
@@ -2728,7 +2784,7 @@ class AlphaBot:
                                 f"family={candidate.family} template={candidate.template_id} "
                                 f"S={refinement_row['base_sharpe']:.2f} F={refinement_row['base_fitness']:.2f} "
                                 f"→ univ={suggested['universe']} neut={suggested['neutralization']} "
-                                f"decay={suggested['decay']} trunc={suggested['truncation']}"
+                                f"decay={suggested['decay']} delay={suggested.get('delay', 1)} trunc={suggested['truncation']}"
                             )
                         except Exception as exc:
                             print(f"[OPTUNA_FAIL] {exc}")

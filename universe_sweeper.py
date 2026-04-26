@@ -28,39 +28,91 @@ from typing import Any
 SWEEP_UNIVERSES = ["TOP3000", "TOP1000", "TOP500", "TOP200", "TOPSP500"]
 
 # Per-universe settings variants to try
-# Each universe gets 2 variants: (neutralization, decay) pairs
+# Each universe gets 2-5 variants: (neutralization, decay, optional delay) tuples
 # Smaller universes need tighter neutralization + higher decay for turnover control
+# v7.2.1: delay=0 variants added across ALL universes — they score 1/3 of delay-1
+# points but live in a separate self-correlation space, so they can land in the
+# portfolio when delay-1 versions can't. With a saturated portfolio, +27 from a
+# d0 alpha beats -100 from a d1 alpha that gets rejected, every time.
 UNIVERSE_VARIANTS = {
     "TOP3000": [
         {"neutralization": "NONE", "decay": 0},
         {"neutralization": "MARKET", "decay": 4},
         {"neutralization": "SUBINDUSTRY", "decay": 6},
         {"neutralization": "MARKET", "decay": 10},
+        {"neutralization": "MARKET", "decay": 4, "delay": 0},
+        {"neutralization": "SUBINDUSTRY", "decay": 6, "delay": 0},
     ],
     "TOP1000": [
         {"neutralization": "NONE", "decay": 4},
         {"neutralization": "MARKET", "decay": 6},
         {"neutralization": "SUBINDUSTRY", "decay": 8},
         {"neutralization": "INDUSTRY", "decay": 10},
+        {"neutralization": "SUBINDUSTRY", "decay": 6, "delay": 0},
+        {"neutralization": "INDUSTRY", "decay": 8, "delay": 0},
     ],
     "TOP500": [
         {"neutralization": "NONE", "decay": 6},
         {"neutralization": "SUBINDUSTRY", "decay": 6},
         {"neutralization": "INDUSTRY", "decay": 8},
         {"neutralization": "SUBINDUSTRY", "decay": 10},
+        {"neutralization": "SUBINDUSTRY", "decay": 8, "delay": 0},
     ],
     "TOP200": [
         {"neutralization": "SUBINDUSTRY", "decay": 8},
         {"neutralization": "INDUSTRY", "decay": 10},
         {"neutralization": "SUBINDUSTRY", "decay": 12},
+        {"neutralization": "INDUSTRY", "decay": 10, "delay": 0},
     ],
     "TOPSP500": [
         {"neutralization": "NONE", "decay": 0},
         {"neutralization": "MARKET", "decay": 6},
         {"neutralization": "SUBINDUSTRY", "decay": 8},
         {"neutralization": "INDUSTRY", "decay": 10},
+        {"neutralization": "SUBINDUSTRY", "decay": 8, "delay": 0},
     ],
 }
+
+
+# v7.2.1: Templates that DON'T work at delay=0 — they reference today's return
+# or close before the bar has settled. Skip delay-0 sweeps for these.
+# Pattern matching is intentionally loose: any unguarded `returns` or `close`
+# at the top level (not inside a ts_ operator) is suspect.
+
+
+def expression_delay0_safe(expression: str) -> bool:
+    """Conservative delay-0 safety check.
+
+    Delay-0 alphas should not use same-day price/return tokens directly.
+    We allow these tokens when they are inside explicit time-series wrappers
+    such as ts_mean(...), ts_rank(...), ts_delta(...), ts_delay(...), etc.
+    This is intentionally conservative: false negatives cost a sim; false
+    positives can create useless/failed d0 sweeps.
+    """
+    if not expression:
+        return False
+    import re
+    expr_l = expression.lower()
+    risky = {"returns", "close", "open", "high", "low", "vwap"}
+
+    def strip_ts_wrappers(s: str) -> str:
+        prev = None
+        for _ in range(12):
+            if s == prev:
+                break
+            prev = s
+            s = re.sub(r'ts_[a-z_]+\([^()]*\)', '', s)
+        return s
+
+    stripped = strip_ts_wrappers(expr_l)
+    for tok in risky:
+        if re.search(rf'\b{tok}\b', stripped):
+            return False
+    return True
+
+
+def _expression_safe_for_delay_0(expression: str) -> bool:
+    return expression_delay0_safe(expression)
 
 
 @dataclass
@@ -91,11 +143,16 @@ class UniverseSweeper:
         self._sweep_count = 0
         self._sweep_window_start = time.time()
 
-    def _make_key(self, expr: str, universe: str, neut: str, decay: int) -> str:
+    def _make_key(self, expr: str, universe: str, neut: str, decay: int, delay: int = 1) -> str:
         # v7.1: Use hash for compact storage — prevents Supabase JSON truncation
         # with 500+ swept pairs (~40KB as full strings → ~8KB as hashes)
+        # v7.2.1: delay-0 variants get a distinct key suffix so they don't collide
+        # with delay-1 sweeps. Default delay (1) keeps the old key format for
+        # backwards compatibility with previously-saved swept state.
         import hashlib
         raw = f"{expr}:{universe}:{neut}:{decay}"
+        if delay != 1:
+            raw += f":d{delay}"
         return hashlib.md5(raw.encode()).hexdigest()[:12]
 
     def queue_sweep(
@@ -150,10 +207,14 @@ class UniverseSweeper:
         original_universe = settings.get("universe", "TOP3000")
         original_neut = settings.get("neutralization", "MARKET")
         original_decay = int(settings.get("decay", 4))
+        original_delay = int(settings.get("delay", 1))
 
         # Mark original settings as swept
-        orig_key = self._make_key(expression, original_universe, original_neut, original_decay)
+        orig_key = self._make_key(expression, original_universe, original_neut, original_decay, original_delay)
         self._swept.add(orig_key)
+
+        # v7.2.1: Decide once whether delay-0 variants are safe for this expression
+        delay_0_safe = _expression_safe_for_delay_0(expression)
 
         queued = 0
 
@@ -163,12 +224,19 @@ class UniverseSweeper:
             for variant in variants:
                 neut = variant["neutralization"]
                 decay = variant["decay"]
+                # v7.2.1: variant may specify delay=0; otherwise inherit from original
+                variant_delay = variant.get("delay", original_delay)
 
-                # Skip if this is the exact original settings
-                if universe == original_universe and neut == original_neut and decay == original_decay:
+                # Skip delay-0 variants for expressions that reference raw returns/close
+                if variant_delay == 0 and not delay_0_safe:
                     continue
 
-                sweep_key = self._make_key(expression, universe, neut, decay)
+                # Skip if this is the exact original settings
+                if (universe == original_universe and neut == original_neut
+                        and decay == original_decay and variant_delay == original_delay):
+                    continue
+
+                sweep_key = self._make_key(expression, universe, neut, decay, variant_delay)
                 if sweep_key in self._swept:
                     continue
 
@@ -179,7 +247,7 @@ class UniverseSweeper:
                 sweep_settings = {
                     "region": settings.get("region", "USA"),
                     "universe": universe,
-                    "delay": int(settings.get("delay", 1)),
+                    "delay": variant_delay,
                     "decay": decay,
                     "neutralization": neut,
                     "truncation": float(settings.get("truncation", 0.08)),
@@ -199,7 +267,7 @@ class UniverseSweeper:
         if queued:
             print(
                 f"[SWEEP_QUEUED] {queued} universe+settings sweeps for "
-                f"{template_id or 'alpha'} (original={original_universe}/{original_neut}/d{original_decay})"
+                f"{template_id or 'alpha'} (original={original_universe}/{original_neut}/decay{original_decay}/delay{original_delay})"
             )
 
         return queued
@@ -271,6 +339,7 @@ class UniverseSweeper:
             universe = settings.get("universe", "TOP3000")
             neut = settings.get("neutralization", "MARKET")
             decay = int(settings.get("decay", 4))
-            self._swept.add(self._make_key(expr, universe, neut, decay))
+            delay = int(settings.get("delay", 1))
+            self._swept.add(self._make_key(expr, universe, neut, decay, delay))
 
         print(f"[SWEEP] Loaded {len(self._swept)} already-swept expression:settings pairs")

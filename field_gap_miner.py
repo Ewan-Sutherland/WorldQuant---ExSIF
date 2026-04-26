@@ -131,22 +131,27 @@ SKIP_TOKENS = {
 # Weighted category selection — based on 40K+ sims of evidence.
 # Higher weight = more gap mining attempts in that category.
 CATEGORY_WEIGHTS = {
-    "fn_financial": 10.0,        # 316 fields, only 2 used, proven +198 score
-    "news_events": 8.0,          # rp_css/rp_ess fields, proven +28 score
-    "supply_chain": 7.0,         # pv13_*, rel_ret_* — untapped network effects
-    "options": 6.0,              # different IV tenors — proven category
-    "fundamental": 5.0,          # core fundamentals not yet tried
-    "hist_vol": 5.0,             # vol fields not yet tried
-    "social_sentiment": 4.0,     # scl12/scl15 sentiment
-    "research_sentiment": 4.0,   # snt1_ fields
-    "analyst_estimates": 3.0,    # est_ebitda etc (NOT anl4_)
-    "news_data": 3.0,            # news microstructure
-    "vector_data": 3.0,          # vec fields
-    "derivative_scores": 2.0,    # fscore derivatives
-    "risk_beta": 2.0,            # beta fields
-    "model77": 0.5,              # 3238 fields but 0% eligible in 214 sims — near-dead
-    "price_volume": 0.1,         # mostly metadata (cusip, currency)
-    "universe_membership": 0.0,  # not tradable signals
+    # v7.2.6: weights rebalanced from observed hit rates in production logs:
+    # supply_chain hit 16% (4/25), risk_beta hit 10% (1/10), fn_financial 0% (0/24),
+    # news_events 0% (0/11), options 0% (0/8). Old weights were tuned for an empty
+    # portfolio months ago when fn_ fields were genuinely fresh — they're now
+    # heavily saturated. Boost what's actually working.
+    "supply_chain": 10.0,        # ↑ from 7 — hit 16% in recent gap mining
+    "risk_beta": 8.0,            # ↑ from 2 — hit 10%, untapped territory
+    "research_sentiment": 6.0,   # ↑ from 4 — snt1_ fields mostly unused
+    "social_sentiment": 5.0,     # ↑ from 4 — scl12 fields underexplored
+    "hist_vol": 5.0,             # = unchanged — vol fields not yet tried
+    "fundamental": 4.0,          # ↓ from 5 — getting saturated
+    "fn_financial": 3.0,         # ↓↓ from 10 — 0% hit rate, heavy portfolio overlap
+    "news_events": 3.0,          # ↓ from 8 — 0% hit rate, rp_css_mna heavily used
+    "analyst_estimates": 4.0,    # ↑ from 3 — est_* fields still relatively fresh
+    "news_data": 3.0,            # = unchanged
+    "options": 2.0,              # ↓ from 6 — IV/parkinson saturation
+    "vector_data": 3.0,          # = unchanged
+    "derivative_scores": 2.0,    # = unchanged
+    "model77": 0.5,              # = unchanged — near-dead
+    "price_volume": 0.1,         # = unchanged — metadata only
+    "universe_membership": 0.0,  # = unchanged — not signals
 }
 
 # Field name patterns that are metadata, not tradable signals

@@ -16,6 +16,8 @@ from typing import Optional, Any
 from contextlib import contextmanager
 
 import requests
+from requests import RequestException
+import time
 
 from models import Candidate, Run, Metrics
 
@@ -54,8 +56,36 @@ class Storage:
 
     # ── HTTP helpers ──────────────────────────────────────────────────
 
+    def _request_with_retry(self, method: str, url: str, *, retries: int = 3, **kwargs):
+        """Small Supabase retry wrapper.
+
+        We still return []/None at the public helper layer for backwards
+        compatibility, but transient 429/5xx/network errors are retried and
+        logged distinctly so coordination bugs do not masquerade as empty tables.
+        """
+        last_exc = None
+        last_response = None
+        for attempt in range(retries):
+            try:
+                r = requests.request(method, url, timeout=30, **kwargs)
+                last_response = r
+                if r.status_code not in (429, 500, 502, 503, 504):
+                    return r
+                logger.warning(f"{method} {url} transient failure: {r.status_code} {r.text[:200]}")
+            except RequestException as exc:
+                last_exc = exc
+                logger.warning(f"{method} {url} request error attempt {attempt + 1}/{retries}: {exc}")
+            time.sleep(0.5 * (attempt + 1))
+        if last_exc:
+            raise last_exc
+        return last_response
+
     def _get(self, table: str, params: dict | None = None) -> list[dict]:
-        r = requests.get(f"{self.base}/{table}", headers=self.headers, params=params or {}, timeout=30)
+        try:
+            r = self._request_with_retry("GET", f"{self.base}/{table}", headers=self.headers, params=params or {})
+        except RequestException as exc:
+            logger.error(f"GET {table} unavailable: {exc}")
+            return []
         if r.status_code not in (200, 206):
             logger.warning(f"GET {table} failed: {r.status_code} {r.text[:300]}")
             return []
@@ -68,7 +98,11 @@ class Storage:
             headers["Prefer"] = "resolution=merge-duplicates,return=representation"
             if on_conflict:
                 url += f"?on_conflict={on_conflict}"
-        r = requests.post(url, headers=headers, json=data, timeout=30)
+        try:
+            r = self._request_with_retry("POST", url, headers=headers, json=data)
+        except RequestException as exc:
+            logger.error(f"POST {table} unavailable: {exc}")
+            return None
         if r.status_code not in (200, 201):
             logger.warning(f"POST {table} failed: {r.status_code} {r.text[:300]}")
             return None
@@ -77,7 +111,11 @@ class Storage:
 
     def _patch(self, table: str, match: dict, data: dict) -> dict | None:
         params = {k: f"eq.{v}" for k, v in match.items()}
-        r = requests.patch(f"{self.base}/{table}", headers=self.headers, params=params, json=data, timeout=30)
+        try:
+            r = self._request_with_retry("PATCH", f"{self.base}/{table}", headers=self.headers, params=params, json=data)
+        except RequestException as exc:
+            logger.error(f"PATCH {table} unavailable: {exc}")
+            return None
         if r.status_code not in (200, 204):
             logger.warning(f"PATCH {table} failed: {r.status_code} {r.text[:300]}")
             return None
@@ -86,16 +124,24 @@ class Storage:
 
     def _delete(self, table: str, match: dict) -> bool:
         params = {k: f"eq.{v}" for k, v in match.items()}
-        r = requests.delete(f"{self.base}/{table}", headers=self.headers, params=params, timeout=30)
-        return r.status_code in (200, 204)
+        try:
+            r = self._request_with_retry("DELETE", f"{self.base}/{table}", headers=self.headers, params=params)
+            return r.status_code in (200, 204)
+        except RequestException as exc:
+            logger.error(f"DELETE {table} unavailable: {exc}")
+            return False
 
     def _rpc(self, function: str, params: dict | None = None) -> list[dict]:
-        r = requests.post(
-            f"{self.base}/rpc/{function}",
-            headers=self.headers,
-            json=params or {},
-            timeout=30,
-        )
+        try:
+            r = self._request_with_retry(
+                "POST",
+                f"{self.base}/rpc/{function}",
+                headers=self.headers,
+                json=params or {},
+            )
+        except RequestException as exc:
+            logger.error(f"RPC {function} unavailable: {exc}")
+            return []
         if r.status_code != 200:
             logger.warning(f"RPC {function} failed: {r.status_code} {r.text[:300]}")
             return []

@@ -79,6 +79,11 @@ class AlphaGenerator:
         self._category_usage = {cat: 0 for cat in self.DATA_CATEGORIES}
         self._generation_count = 0
 
+        # v7.2.6: Family saturation cooldown — track consecutive saturated
+        # generations per family and apply weight penalty during cooldown.
+        self._family_saturated_streak: dict[str, int] = {}
+        self._family_cooldown_until: dict[str, int] = {}  # family -> generation index when cooldown ends
+
         # v7.2: Epoch engine state
         self._epoch_start_time = None  # UTC timestamp when current epoch started
         self._epoch_index = 0          # Current position in EPOCH_SCHEDULE
@@ -236,14 +241,35 @@ class AlphaGenerator:
     # ============================
 
     def generate_candidate(self, family_bias=None, template_bias=None, settings_bias=None):
-        family = self._sample_family(family_bias)
-        template = self._sample_template(family, template_bias)
+        # v7.2.6: Retry generation if the rendered expression uses 2+ saturated
+        # fields — these alphas almost always score negative against the existing
+        # portfolio. Up to 12 retries (was 6) before giving up.
+        # Also track saturation streak per family for cooldown logic.
+        max_retries = 12
+        for attempt in range(max_retries):
+            family = self._sample_family(family_bias)
+            template = self._sample_template(family, template_bias)
 
-        params = self._sample_params(template["expression"], family=family)
-        expr, fields = self._render(template["expression"], params)
-        expr = self._post_process(expr, family=family, template_id=template["template_id"], light=False)
+            params = self._sample_params(template["expression"], family=family)
+            expr, fields = self._render(template["expression"], params)
+            expr = self._post_process(expr, family=family, template_id=template["template_id"], light=False)
+
+            if attempt < max_retries - 1 and self._is_oversaturated(expr):
+                # Track per-family saturation streak
+                self._family_saturated_streak[family] = self._family_saturated_streak.get(family, 0) + 1
+                trigger = getattr(config, "FAMILY_COOLDOWN_TRIGGER", 3)
+                if self._family_saturated_streak[family] >= trigger:
+                    duration = getattr(config, "FAMILY_COOLDOWN_DURATION", 50)
+                    self._family_cooldown_until[family] = self._generation_count + duration
+                    self._family_saturated_streak[family] = 0  # reset after triggering
+                    print(f"[FAMILY_COOLDOWN] {family} → cooldown for next {duration} generations (saturation streak)")
+                continue
+            # Successful generation — reset streak for this family
+            self._family_saturated_streak[family] = 0
+            break
 
         settings = self._sample_settings(family, settings_bias=settings_bias)
+        settings = self._maybe_delay0(settings, expr, family=family, context="fresh")
         canon = canonicalize_expression(expr)
         h = hash_candidate(canon, settings.to_dict())
 
@@ -258,7 +284,114 @@ class AlphaGenerator:
             settings=settings,
         )
 
-    def create_from_expression(self, raw_expr: str, settings_bias=None, settings_override=None) -> Candidate:
+    def _is_oversaturated(self, expr: str) -> bool:
+        """v7.2.6: Reject expressions that use saturated fields OR shapes heavily.
+
+        Two ways an expression can be saturated:
+
+        1. FIELD saturation — uses 2+ portfolio-saturated fields, or repeats one.
+           These almost always score negative against the existing portfolio.
+
+        2. STRUCTURAL saturation — matches one of the over-mined mathematical
+           shapes that already constitute >20% of the portfolio. Even with
+           novel fields, these patterns produce PnL curves that self-correlate
+           with existing submissions because the dominant return component is
+           from the shared structural backbone (e.g. rank(-returns)).
+
+        The STRUCTURAL check is probabilistic: 75% reject rate, 25% allow,
+        so we still occasionally explore in case a specific field genuinely
+        breaks the correlation. That's the price of NOT being too rigid.
+        """
+        try:
+            from datasets import _SATURATED_FIELDS
+        except ImportError:
+            return False
+        expr_l = expr.lower()
+
+        # === FIELD SATURATION CHECK ===
+        sat_count = 0
+        for fld in _SATURATED_FIELDS:
+            if fld in expr_l:
+                if expr_l.count(fld) >= 2:
+                    return True
+                sat_count += 1
+                if sat_count >= 2:
+                    return True
+
+        # === STRUCTURAL SATURATION CHECK ===
+        # Pattern 1: "rank(ts_backfill(...)) * rank(-returns)" or its swap
+        # Already ~24% of portfolio. Reject 75% of the time.
+        # Permissive regex: catches "rank(X) * rank(-returns)" where X contains ts_backfill
+        import re
+        has_backfill_returns = (
+            re.search(r'rank\([^)]*ts_backfill[^)]+\)[^*+]*\*[^*+]*rank\(-returns\)', expr_l) is not None
+            or re.search(r'rank\(-returns\)[^*+]*\*[^*+]*rank\([^)]*ts_backfill', expr_l) is not None
+        )
+        if has_backfill_returns and self.rng.random() < 0.75:
+            return True
+
+        # Pattern 2: "ts_corr of ranks" — already ~10% of portfolio. Reject 60%.
+        has_ts_corr_ranks = re.search(r'ts_corr\(\s*rank\([^)]+\)\s*,\s*rank\(', expr_l) is not None
+        if has_ts_corr_ranks and self.rng.random() < 0.60:
+            return True
+
+        # Pattern 3: bare "rank(field) * rank(-returns)" — common gap mining shape
+        has_bare_rank_returns = re.search(r'rank\([^)(]+\)\s*\*\s*rank\(-returns\)', expr_l) is not None
+        if has_bare_rank_returns and self.rng.random() < 0.50:
+            return True
+
+        return False
+
+    def generate_delay0_candidate(self, family_bias=None, template_bias=None, settings_bias=None):
+        """v7.2.4: Generate from the dedicated Delay-0 mini-universe.
+
+        This is intentionally separate from normal template generation so delay=0
+        exploration does not contaminate combiner/evolver populations that were
+        learned mostly under delay=1.
+        """
+        families = [f for f in getattr(config, "DELAY0_TEMPLATE_FAMILIES", set()) if f in TEMPLATE_LIBRARY]
+        if not families:
+            return None
+
+        # Respect dataset blocking if a teammate lacks some fields.
+        try:
+            from datasets import get_blocked_families
+            blocked = get_blocked_families()
+            families = [f for f in families if f not in blocked]
+        except Exception:
+            pass
+        if not families:
+            return None
+
+        cfg_weights = getattr(config, "FAMILY_BASE_WEIGHTS", {})
+        weights = []
+        for fam in families:
+            w = DEFAULT_BASE_FAMILY_WEIGHTS.get(fam, 1.0) * float(cfg_weights.get(fam, 1.0))
+            if family_bias:
+                w *= family_bias.get(fam, 1.0)
+            weights.append(max(w, 0.001))
+        family = self.rng.choices(families, weights=weights, k=1)[0]
+
+        template = self._sample_template(family, template_bias)
+        params = self._sample_params(template["expression"], family=family)
+        expr, fields = self._render(template["expression"], params)
+        expr = self._post_process(expr, family=family, template_id=template["template_id"], light=True)
+
+        settings = self._sample_delay0_settings(family, settings_bias=settings_bias)
+        canon = canonicalize_expression(expr)
+        h = hash_candidate(canon, settings.to_dict())
+        return Candidate.create(
+            expression=expr,
+            canonical_expression=canon,
+            expression_hash=h,
+            template_id=template["template_id"],
+            family=family,
+            fields=fields,
+            params=params,
+            settings=settings,
+        )
+
+    def create_from_expression(self, raw_expr: str, settings_bias=None, settings_override=None, allow_delay0: bool = True) -> Candidate:
         """
         v5.6: Create a Candidate from a raw LLM-generated expression.
         Classifies the expression into a family, generates settings, and wraps it.
@@ -274,13 +407,15 @@ class AlphaGenerator:
             settings = SimulationSettings(
                 region="USA",
                 universe=settings_override.get("universe", "TOP3000"),
-                delay=1,
+                delay=int(settings_override.get("delay", 1)),
                 decay=int(settings_override.get("decay", 6)),
                 neutralization=settings_override.get("neutralization", "SUBINDUSTRY"),
                 truncation=float(settings_override.get("truncation", 0.08)),
             )
         else:
             settings = self._sample_settings(family, settings_bias=settings_bias)
+            if allow_delay0:
+                settings = self._maybe_delay0(settings, expr, family=family, context="fresh")
 
         canon = canonicalize_expression(expr)
         h = hash_candidate(canon, settings.to_dict())
@@ -562,6 +697,7 @@ class AlphaGenerator:
         "price_technical": {"mean_reversion", "cross_sectional", "liquidity_scaled", "conditional",
                            "vol_adjusted", "volatility", "intraday", "intraday_pattern", "vol_gated",
                            "momentum", "volume_flow", "price_vol_corr",
+                           "delay0_reversal", "delay0_volume_pressure", "delay0_vwap_range",
                            "regime_ternary",
                            # Research: mean reversion & technical
                            "mr_short_term", "mr_vol_gated", "mr_regression_residual",
@@ -604,7 +740,8 @@ class AlphaGenerator:
                     "sent_social_buzz", "sent_level_change", "sent_ravenpack",
                     "sent_news_reaction", "sent_price_divergence",
                     "season_earnings_calendar", "season_event_recency", "season_data_release_mr",
-                    "event_mna", "event_insider", "event_business", "event_credit"},
+                    "event_mna", "event_insider", "event_business", "event_credit",
+                    "delay0_event_reaction"},
         "options": {"options_vol", "options_analytics", "hist_vol", "iv_term_structure",
                    # Research: options, volatility
                    "opt_call_breakeven_ts", "opt_put_breakeven_ts", "opt_forward_price",
@@ -744,6 +881,14 @@ class AlphaGenerator:
             elif n_corr_fails == 1:
                 base *= 0.70    # Mild discount
 
+            # v7.2.6: Family saturation cooldown — if the family produced 3+
+            # consecutive saturated candidates (templates hardcoding portfolio
+            # fields), zero its weight for the next 50 generations. Forces
+            # breadth instead of letting Thompson lock onto a saturated family.
+            cooldown_until = self._family_cooldown_until.get(fam, 0)
+            if cooldown_until > self._generation_count:
+                base *= getattr(config, "FAMILY_COOLDOWN_WEIGHT", 0.05)
+
             weights.append(max(base, 0.001))
 
         chosen = self.rng.choices(fams, weights=weights, k=1)[0]
@@ -756,7 +901,17 @@ class AlphaGenerator:
         return chosen
 
     def _sample_template(self, family, bias):
-        templates = TEMPLATE_LIBRARY[family]
+        # v7.2.6: Filter out blacklisted templates that hardcode saturated fields.
+        # These templates always score negative against the existing portfolio so
+        # the bot wastes sims on them. Better to never sample them.
+        blacklist = getattr(config, "BLACKLISTED_TEMPLATES", set())
+        templates = [t for t in TEMPLATE_LIBRARY[family] if t["template_id"] not in blacklist]
+        # Safety: if the entire family is blacklisted, fall back to full set
+        # (better to generate something than nothing — the saturation guard will
+        # still filter at the expression level)
+        if not templates:
+            templates = TEMPLATE_LIBRARY[family]
+
         base_boosts = getattr(config, "TEMPLATE_BASE_WEIGHTS", {})
         preferred_boosts = getattr(config, "PREFERRED_TEMPLATE_BOOSTS", {})
         penalties = getattr(config, "TEMPLATE_WEIGHT_PENALTIES", {})
@@ -1408,6 +1563,38 @@ class AlphaGenerator:
     # SETTINGS
     # ============================
 
+
+    def _delay0_safe(self, expression: str) -> bool:
+        """Conservative check before sampling delay=0 for generated/refined candidates."""
+        try:
+            from settings_optimizer import expression_delay0_safe
+            return expression_delay0_safe(expression)
+        except Exception:
+            return False
+
+    def _maybe_delay0(self, settings, expression: str, family: str = "", context: str = "fresh"):
+        """Occasionally flip safe candidates into delay=0.
+
+        Delay 0 is deliberately a mini-universe, not the default. We give it a
+        controlled exploration budget so it can discover separate self-corr space
+        without burning most sims on unsuitable d1-style templates.
+        """
+        try:
+            import config
+            if not getattr(config, "DELAY0_ENABLED", True):
+                return settings
+            if not self._delay0_safe(expression):
+                return settings
+            prob = getattr(config, "DELAY0_FRESH_PROBABILITY", 0.08) if context == "fresh" else getattr(config, "DELAY0_REFINE_PROBABILITY", 0.12)
+            family_boost = getattr(config, "DELAY0_FAMILY_BOOST", {})
+            prob *= float(family_boost.get(family, 1.0))
+            prob = max(0.0, min(0.35, prob))
+            if self.rng.random() < prob:
+                settings.delay = 0
+        except Exception:
+            pass
+        return settings
+
     def _mutate_settings(self, s, mode: str = "general", family: str = ""):
         out = dict(s)
 
@@ -1480,6 +1667,32 @@ class AlphaGenerator:
 
         return out
 
+    def _sample_delay0_settings(self, family, settings_bias=None):
+        """Settings sampler for the Delay-0 mini-universe."""
+        bias = settings_bias or {}
+
+        def choice(options, key):
+            opts = list(options)
+            dim_bias = bias.get(key) if isinstance(bias, dict) else None
+            if dim_bias:
+                weights = [max(0.25, min(2.5, float(dim_bias.get(str(o), 1.0)))) for o in opts]
+                return self.rng.choices(opts, weights=weights, k=1)[0]
+            return self.rng.choice(opts)
+
+        return SimulationSettings(
+            region=config.DEFAULT_REGION,
+            universe=choice(getattr(config, "DELAY0_UNIVERSES", ["TOP3000", "TOP1000", "TOP500"]), "universe"),
+            delay=0,
+            decay=choice(getattr(config, "DELAY0_DECAYS", [0, 1, 2, 3, 4, 6]), "decay"),
+            neutralization=choice(getattr(config, "DELAY0_NEUTRALIZATIONS", ["MARKET", "INDUSTRY", "SUBINDUSTRY", "NONE"]), "neutralization"),
+            truncation=choice(getattr(config, "DELAY0_TRUNCATIONS", [0.03, 0.05, 0.08]), "truncation"),
+            pasteurization=config.DEFAULT_PASTEURIZATION,
+            unit_handling=config.DEFAULT_UNIT_HANDLING,
+            nan_handling=config.DEFAULT_NAN_HANDLING,
+            max_stock_weight=config.DEFAULT_MAX_STOCK_WEIGHT,
+            language=config.DEFAULT_LANGUAGE,
+        )
+
     def _sample_settings(self, family, settings_bias=None):
         """
         v5.9: Dataset-aware settings sampling.
@@ -1487,6 +1700,9 @@ class AlphaGenerator:
         Uses DATASET_NEUTRALIZATION from official WQ Neutralisation.csv (75% of time).
         Falls back to adaptive sampling for exploration (25%).
         """
+        if family in getattr(config, "DELAY0_TEMPLATE_FAMILIES", set()):
+            return self._sample_delay0_settings(family, settings_bias=settings_bias)
+
         EXPLORE_PROB = 0.20
         FLOOR_WEIGHT = 0.25
         CEILING_WEIGHT = 2.50

@@ -33,8 +33,15 @@ def _window_id() -> str:
 
 
 def _recent_cutoff() -> str:
-    """ISO timestamp for 'recent' signals — ignore anything older than 30 min."""
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+    """ISO timestamp for recent coordination signals.
+
+    Keep this wider than the slowest expected score-check shard. In the
+    2026-04-26 run, worker bots emitted scores_ready ~20-30 minutes before
+    the coordinator finished its own checks; a per-bot run_started_at cutoff
+    made those valid rows invisible. Window_id already prevents cross-window
+    leakage, so use a generous same-window freshness guard instead.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=3)
     return cutoff.isoformat()
 
 
@@ -54,16 +61,11 @@ class CoordinatedSubmitPipeline:
         self.window_id = _window_id()
         self.is_coordinator = getattr(config_mod, "IS_COORDINATOR", False)
         self.participating_owners = getattr(config_mod, "COORDINATED_SUBMIT_OWNERS", [])
-        # v7.2.1: Timestamp when this pipeline invocation started.
-        # Used to filter out signals from PREVIOUS runs in the same 6-hour window.
-        # Supabase window_id is a 6-hour block, so an earlier run (e.g. 18:30)
-        # and a later run (e.g. 22:50) share the same window_id but are logically
-        # separate cycles. Without this filter, old scores_ready/submit_command
-        # signals would be matched against the current run, causing false "ready"
-        # states and missed commands. We subtract 10 min as buffer for clock skew
-        # between bots (each bot has its own run_started_at).
-        from datetime import datetime, timezone, timedelta
-        self.run_started_at = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        # v7.2.2: Signal reads are keyed by the shared 6-hour window_id plus a
+        # generous recent cutoff. Do NOT use this bot's local start time for
+        # scores_ready; slower coordinator runs can otherwise ignore valid worker
+        # signals that arrived earlier in the same cycle.
+        self.signal_cutoff = _recent_cutoff()
 
     # ── Signals ──────────────────────────────────────────────────
 
@@ -95,8 +97,9 @@ class CoordinatedSubmitPipeline:
                          timeout: int = None) -> dict | None:
         """Poll for a specific signal. Returns signal row or None on timeout.
 
-        Uses self.run_started_at as the cutoff so we only see signals from
-        THIS pipeline invocation, not previous runs in the same 6-hour window.
+        Uses a shared same-window freshness cutoff instead of this bot's local
+        start time. This prevents the coordinator from missing workers that
+        legitimately finished score checks earlier.
         """
         timeout = timeout or self.WAIT_TIMEOUT
         deadline = time.time() + timeout
@@ -105,7 +108,7 @@ class CoordinatedSubmitPipeline:
             params = {
                 "window_id": f"eq.{self.window_id}",
                 "signal": f"eq.{signal}",
-                "created_at": f"gte.{self.run_started_at}",
+                "created_at": f"gte.{self.signal_cutoff}",
                 "order": "created_at.desc",
                 "limit": 10,
             }
@@ -118,13 +121,16 @@ class CoordinatedSubmitPipeline:
                 if rows and round_num is not None:
                     # Filter by round_num in payload
                     for row in rows:
-                        p = json.loads(row.get("payload", "{}")) if row.get("payload") else {}
+                        try:
+                            p = json.loads(row.get("payload", "{}")) if row.get("payload") else {}
+                        except (TypeError, json.JSONDecodeError):
+                            p = {}
                         if p.get("round_num") == round_num:
                             return row
                 elif rows:
                     return rows[0]
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"  [SIGNAL] poll failed ({signal}): {exc}")
             remaining = deadline - time.time()
             if remaining > 0:
                 time.sleep(min(self.POLL_INTERVAL, remaining))

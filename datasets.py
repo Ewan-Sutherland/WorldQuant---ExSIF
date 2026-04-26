@@ -405,6 +405,12 @@ _SATURATED_FIELDS = {
     'parkinson_volatility_120', 'pcr_oi_270', 'rel_ret_comp', 'rp_ess_mna',
     'rp_ess_revenue', 'sales', 'scl12_alltype_buzzvec', 'snt1_d1_earningssurprise',
     'snt1_d1_netearningsrevision',
+    # v7.2.6: Newly identified portfolio-saturated fields from log analysis
+    # (each appearing 5+ times in confirmed submissions and triggering
+    # SCORE_NEG_BLOCK on new candidates that include them)
+    'rp_css_mna', 'fn_comp_non_opt_forfeited_a', 'fn_amortization_of_intangible_assets_a',
+    'fn_amortization_of_intangible_assets_q', 'fn_oth_income_loss_net_of_tax_a',
+    'fn_accrued_liab_a', 'rel_num_all',
 }
 
 

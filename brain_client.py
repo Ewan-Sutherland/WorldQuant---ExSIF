@@ -174,7 +174,7 @@ class BrainClient:
                             "returns": None,
                             "margin": None,
                             "drawdown": None,
-                            "checks_passed": True,
+                            "checks_passed": False,
                         }
                     )
             else:
@@ -190,7 +190,8 @@ class BrainClient:
                     }
                 )
 
-        elif status == "failed":
+        elif status in {"failed", "fail", "error"}:
+            result["status"] = "failed"
             result["error_message"] = self._extract_error(raw)
 
         return result
@@ -291,6 +292,19 @@ class BrainClient:
                         failed_checks.append(check)
                         if name == "SELF_CORRELATION" and value is not None:
                             self_corr_value = float(value)
+
+                    # Defensive guard: occasionally WQ returns PASS text with a
+                    # value just above the stated limit. Treat the numeric limit
+                    # as authoritative so we do not stage obviously correlated
+                    # variants as viable.
+                    if name == "SELF_CORRELATION" and value is not None:
+                        try:
+                            self_corr_value = float(value)
+                            limit_f = float(limit) if limit is not None else 0.7
+                            if self_corr_value > limit_f:
+                                failed_checks.append(check)
+                        except (TypeError, ValueError):
+                            pass
 
                     status_icon = "✅" if result == "PASS" else "❌" if result == "FAIL" else "⚠️"
                     print(
@@ -436,6 +450,19 @@ class BrainClient:
                         failed_checks.append(check)
                         if name == "SELF_CORRELATION" and value is not None:
                             self_corr_value = float(value)
+
+                    # Defensive guard: occasionally WQ returns PASS text with a
+                    # value just above the stated limit. Treat the numeric limit
+                    # as authoritative so we do not stage obviously correlated
+                    # variants as viable.
+                    if name == "SELF_CORRELATION" and value is not None:
+                        try:
+                            self_corr_value = float(value)
+                            limit_f = float(limit) if limit is not None else 0.7
+                            if self_corr_value > limit_f:
+                                failed_checks.append(check)
+                        except (TypeError, ValueError):
+                            pass
                 else:
                     # All checks complete — print results
                     for check in checks:

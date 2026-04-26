@@ -23,6 +23,17 @@ from typing import Optional
 from signal_combiner import classify_expression
 
 
+def _row_delay(row: dict) -> int:
+    try:
+        import json
+        settings = row.get("settings_json") or {}
+        if isinstance(settings, str):
+            settings = json.loads(settings)
+        return int(settings.get("delay", 1))
+    except Exception:
+        return 1
+
+
 # Mutation prompt — fed to the LLM with a parent expression
 MUTATION_PROMPT = """You are evolving a quantitative alpha expression. Your job is to make a SMALL, TARGETED modification to improve it.
 
@@ -105,6 +116,15 @@ class AlphaEvolver:
             expr = row.get("canonical_expression", "")
             if not expr:
                 continue
+
+            # v7.2.4 EVOLVER_DELAY_SKIP: keep Delay-0 and Delay-1 evolution pools separate.
+            try:
+                import config
+                if getattr(config, "SEPARATE_DELAY_REGIMES", True) and not getattr(config, "EVOLVER_ALLOW_DELAY0", False):
+                    if _row_delay(row) == 0:
+                        continue
+            except Exception:
+                pass
 
             # v7.1: Filter out expressions using fields not in this bot's dataset
             try:

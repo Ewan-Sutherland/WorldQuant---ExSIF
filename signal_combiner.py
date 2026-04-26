@@ -53,6 +53,17 @@ CATEGORY_KEYWORDS = {
 }
 
 
+def _row_delay(row: dict) -> int:
+    try:
+        import json
+        settings = row.get("settings_json") or {}
+        if isinstance(settings, str):
+            settings = json.loads(settings)
+        return int(settings.get("delay", 1))
+    except Exception:
+        return 1
+
+
 def classify_expression(expr: str) -> str:
     """Classify an expression into a data category."""
     expr_lower = expr.lower()
@@ -108,6 +119,17 @@ class SignalCombiner:
             expr = row.get("canonical_expression", "")
             if not expr:
                 continue
+
+            # v7.2.4: keep Delay-0 and Delay-1 combo pools separate.
+            # Current combiner is trained on mostly Delay-1 near-passers, so do not
+            # breed Delay-0 components unless explicitly enabled.
+            try:
+                import config
+                if getattr(config, "SEPARATE_DELAY_REGIMES", True) and not getattr(config, "COMBINER_ALLOW_DELAY0", False):
+                    if _row_delay(row) == 0:
+                        continue
+            except Exception:
+                pass
 
             # v7.1: Filter out expressions using fields not in this bot's dataset
             # Prevents combiner from building combos with teammates' fields

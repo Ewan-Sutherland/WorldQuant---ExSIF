@@ -53,12 +53,17 @@ def parse_metrics(run_id: str, result: dict) -> Metrics:
     checks_passed = result.get("checks_passed")
     if checks_passed is None:
         checks_passed = result.get("is_stats_pass")
-    if checks_passed is None:
-        checks_passed = True
 
     fail_reason = None
 
     failed_check_name = extract_failed_check_name(result)
+
+    # Do not silently promote unknown check state when the alpha/metrics fetch
+    # failed. If metrics exist and no failed check is visible, we can still use
+    # the numeric gates below; if metrics are missing, this becomes
+    # missing_metrics rather than eligible.
+    if checks_passed is None:
+        checks_passed = failed_check_name is None
 
     if checks_passed is False:
         fail_reason = f"checks_failed:{failed_check_name}" if failed_check_name else "checks_failed"

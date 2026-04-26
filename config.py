@@ -38,6 +38,51 @@ SIM_TIMEOUT_MINUTES = 45
 # Default simulation settings
 DEFAULT_REGION = "USA"
 DEFAULT_DELAY = 1
+
+# v7.2.3: Controlled Delay-0 exploration. Delay 0 scores lower but can live
+# in a separate self-correlation space. Keep this as a side-budget, not default.
+DELAY0_ENABLED = True
+DELAY0_FRESH_PROBABILITY = 0.04
+DELAY0_REFINE_PROBABILITY = 0.05
+
+# v7.2.4: Treat Delay 0 as a separate mini-universe, not as a random
+# mutation of the Delay 1 search. These probabilities control fresh template
+# generation only; combiner/evolver stay Delay 1 unless explicitly upgraded
+# later with their own delay-aware pools.
+DELAY0_TEMPLATE_PROBABILITY = 0.06
+DELAY0_TEMPLATE_FAMILIES = {
+    "delay0_open_gap_reversal",
+    "delay0_close_vwap_dislocation",
+    "delay0_range_position",
+    "delay0_volume_shock",
+    "delay0_liquidity_pressure",
+    "delay0_options_intraday",
+    "delay0_news_reaction",
+    "delay0_risk_intraday",
+}
+DELAY0_UNIVERSES = ["TOP3000", "TOP1000", "TOP500"]
+DELAY0_NEUTRALIZATIONS = ["MARKET", "INDUSTRY", "SUBINDUSTRY", "NONE"]
+DELAY0_DECAYS = [0, 1, 2, 3, 5]
+DELAY0_TRUNCATIONS = [0.01, 0.03, 0.05, 0.08]
+
+# Delay 0 alphas should not be bred with Delay 1 populations by default.
+# This avoids accidentally turning a slow Delay 1 composite into a noisy
+# Delay 0 expression, or vice versa.
+SEPARATE_DELAY_REGIMES = True
+COMBINER_ALLOW_DELAY0 = False
+EVOLVER_ALLOW_DELAY0 = False
+LLM_ALLOW_DELAY0 = False
+
+DELAY0_FAMILY_BOOST = {
+    "delay0_open_gap_reversal": 1.0,
+    "delay0_close_vwap_dislocation": 1.0,
+    "delay0_range_position": 1.0,
+    "delay0_volume_shock": 1.0,
+    "delay0_liquidity_pressure": 1.0,
+    "delay0_options_intraday": 1.0,
+    "delay0_news_reaction": 1.0,
+    "delay0_risk_intraday": 1.0,
+}
 DEFAULT_UNIVERSES = ["TOP3000", "TOP1000", "TOP500", "TOP200", "TOPSP500"]
 DEFAULT_NEUTRALIZATIONS = ["SUBINDUSTRY", "INDUSTRY", "SECTOR", "MARKET", "NONE"]
 DEFAULT_DECAYS = [2, 4, 6, 8, 10, 12]
@@ -257,6 +302,15 @@ FAMILY_BASE_WEIGHTS = {
     "derivative_interaction": 4.00,  # derivative_scores × price/vol cross-signals
     "cross_dimension": 4.00,    # model77 × events/options structural combos
     "vol_gated": 5.00,          # trade_when(vol_regime, alpha) — rescues S=1.0-1.2 near-passers
+    # v7.2.5: Delay-0 specialist families. Small side-budget because Delay-0 contributes 1/3 points.
+    "delay0_open_gap_reversal": 2.80,
+    "delay0_close_vwap_dislocation": 3.50,
+    "delay0_range_position": 3.00,
+    "delay0_volume_shock": 2.80,
+    "delay0_liquidity_pressure": 2.20,
+    "delay0_options_intraday": 1.80,
+    "delay0_news_reaction": 2.20,
+    "delay0_risk_intraday": 1.60,
 }
 
 TEMPLATE_BASE_WEIGHTS = {
@@ -440,6 +494,11 @@ TEMPLATE_WEIGHT_PENALTIES = {
     "rel_02": 0.01,
     "fs_06": 0.01,
     "fs_08": 0.01,
+    # v7.2.4: Delay-0 specialist mini-universe
+    "delay0_reversal": 2.50,
+    "delay0_volume_pressure": 2.25,
+    "delay0_vwap_range": 2.00,
+    "delay0_event_reaction": 1.75,
 }
 
 DISABLED_REFINEMENT_TEMPLATES = {"vol_02", "ae_03", "wp_06"}
@@ -564,7 +623,8 @@ MAX_SUBMISSIONS_PER_WINDOW = 200
 
 # Gap mining probability: when generating fresh candidates,
 # what % should use the field-gap miner vs normal templates
-GAP_MINING_PROBABILITY = 0.65 if SPRINT_MODE else 0.0
+ENABLE_GAP_MINER = True  # v7.2.6: re-enabled after data showed 8% hit rate (highest of any family). The "slowdown" was the fnd2_/fnd6_ filter bug, not exhaustion.
+GAP_MINING_PROBABILITY = 0.40 if SPRINT_MODE else 0.0  # v7.2.6: 40% — keep as workhorse but leave room for templates and d0 specialists
 
 # Increased refinement depth for sprint
 if SPRINT_MODE:
@@ -572,7 +632,34 @@ if SPRINT_MODE:
     OPTIMIZE_VARIANTS = 8            # was 5 — more settings per optimize pass
 
 # Suppress dead families (0 eligible after 50+ sims)
-DEAD_FAMILY_WEIGHT = 0.01  # near-zero but not zero (allows rare exploration)
+DEAD_FAMILY_WEIGHT = 0.03  # cooldown, not hard death: keeps rare exploration alive
+
+# v7.2.6: Templates that hardcode saturated fields. Never sample these.
+# All of these were producing alphas that hit SCORE_NEG_BLOCK because their
+# baked-in field appears 5+ times in the portfolio. Removing them at sampling
+# time saves 6-12 sims per tick that would otherwise be wasted.
+BLACKLISTED_TEMPLATES = {
+    # operating_income hardcoded (20× in portfolio)
+    "rel_11", "ef_17", "wp_03", "wp_05", "sc_03", "wild_07", "tut_09",
+    "hs_06", "fn_05", "fn_10", "sr_12",
+    # operating_income + parkinson_volatility combo
+    "fv_02", "fv_03", "fv_04", "fv_05", "fv_10", "fv_11", "fv_12",
+    # accruals quality — operating_income heavy
+    "aq_01", "aq_02", "aq_05", "aq_06", "aq_08", "aq_09",
+    # rp_css_mna hardcoded (heavily used in portfolio via emna_*)
+    "emna_01", "emna_03", "emna_04", "emna_05", "emna_06", "emna_07",
+    "emna_08", "em_09", "em_10", "ser_05",
+    # d0 templates that use rp_css_mna or operating_income with -returns
+    "d0_news_01",
+}
+
+# v7.2.6: Family-level saturation cooldown. When a family produces N consecutive
+# saturated candidates, freeze its sampling weight to near-zero for M generations.
+# Prevents Thompson sampler from getting stuck on a family whose templates all
+# hardcode saturated fields.
+FAMILY_COOLDOWN_TRIGGER = 3       # N saturated candidates in a row → cooldown
+FAMILY_COOLDOWN_DURATION = 50     # M generations to freeze
+FAMILY_COOLDOWN_WEIGHT = 0.05     # weight multiplier during cooldown
 DEAD_FAMILIES = {
     "fundamental_scores", "analyst_sentiment", "expanded_fundamental",
     "price_vol_corr", "ravenpack_cat", "size_value", "llm_novel",

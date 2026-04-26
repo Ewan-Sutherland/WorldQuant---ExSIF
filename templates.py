@@ -996,6 +996,70 @@ DATASET_NEUTRALIZATION = {
     "model77_novel": ["INDUSTRY", "SUBINDUSTRY", "MARKET", "SECTOR"],
 }
 
+
+# ══════════════════════════════════════════════════════════════
+# v7.2.4: Delay-0 specialist mini-universe templates
+# These are deliberately short-horizon and are sampled with delay=0 settings
+# only. They are kept separate from the Delay-1 combiner/evolver pools.
+# ══════════════════════════════════════════════════════════════
+DELAY0_TEMPLATES = {
+    "delay0_open_gap_reversal": [
+        {"template_id": "d0_gap_01", "expression": "rank(-(open - ts_delay(close, 1)) / (ts_delay(close, 1) + 0.001))"},
+        {"template_id": "d0_gap_02", "expression": "group_rank(-(open - ts_delay(close, 1)) / (ts_delay(close, 1) + 0.001), subindustry)"},
+        {"template_id": "d0_gap_03", "expression": "rank(-ts_zscore((open - ts_delay(close, 1)) / (ts_delay(close, 1) + 0.001), 20))"},
+    ],
+    "delay0_close_vwap_dislocation": [
+        {"template_id": "d0_vwap_01", "expression": "rank((vwap - close) / (close + 0.001))"},
+        {"template_id": "d0_vwap_02", "expression": "group_rank((vwap - close) / (close + 0.001), industry)"},
+        {"template_id": "d0_vwap_03", "expression": "rank(-ts_zscore((close - vwap) / (vwap + 0.001), 20))"},
+        {"template_id": "d0_vwap_04", "expression": "rank(ts_rank((vwap - close) / (close + 0.001), 5))"},
+    ],
+    "delay0_range_position": [
+        {"template_id": "d0_rng_01", "expression": "rank((high - close) / (high - low + 0.001))"},
+        {"template_id": "d0_rng_02", "expression": "rank(-(close - low) / (high - low + 0.001))"},
+        {"template_id": "d0_rng_03", "expression": "group_rank((vwap - close) / (high - low + 0.001), subindustry)"},
+        {"template_id": "d0_rng_04", "expression": "rank(-ts_zscore((close - low) / (high - low + 0.001), 10))"},
+    ],
+    "delay0_volume_shock": [
+        {"template_id": "d0_vol_01", "expression": "rank(-returns * rank(volume / (adv20 + 0.001)))"},
+        {"template_id": "d0_vol_02", "expression": "rank(ts_delta(volume, 1) / (adv20 + 0.001)) * rank(-returns)"},
+        {"template_id": "d0_vol_03", "expression": "trade_when(volume > ts_mean(volume, 5), rank(-returns), -1)"},
+        {"template_id": "d0_vol_04", "expression": "rank(-ts_zscore(returns, 5) * rank(volume / (adv20 + 0.001)))"},
+    ],
+    "delay0_liquidity_pressure": [
+        {"template_id": "d0_liq_01", "expression": "rank(-returns * rank(adv20))"},
+        {"template_id": "d0_liq_02", "expression": "rank((vwap - close) / (close + 0.001)) * rank(adv20)"},
+        {"template_id": "d0_liq_03", "expression": "group_rank(-returns * rank(volume / (adv20 + 0.001)), industry)"},
+    ],
+    "delay0_options_intraday": [
+        {"template_id": "d0_opt_01", "expression": "rank(ts_backfill(implied_volatility_call_30 - implied_volatility_put_30, 20)) * rank(-returns)"},
+        {"template_id": "d0_opt_02", "expression": "rank(ts_delta(implied_volatility_mean_30, 5)) * rank((vwap - close) / (close + 0.001))"},
+        {"template_id": "d0_opt_03", "expression": "rank(ts_backfill(call_breakeven_60 / (close + 0.001) - 1, 20)) * rank(-returns)"},
+    ],
+    "delay0_news_reaction": [
+        {"template_id": "d0_news_01", "expression": "rank(ts_decay_linear(ts_backfill(rp_css_mna, 20), 3)) * rank(-returns)"},
+        {"template_id": "d0_news_02", "expression": "rank(ts_decay_linear(ts_backfill(rp_css_ratings, 20), 3)) * rank(-returns)"},
+        {"template_id": "d0_news_03", "expression": "rank(ts_decay_linear(ts_backfill(news_atr_ratio, 20), 3)) * rank((vwap - close) / (close + 0.001))"},
+        {"template_id": "d0_news_04", "expression": "rank(ts_backfill(snt_social_value, 20)) * rank(-returns)"},
+    ],
+    "delay0_risk_intraday": [
+        {"template_id": "d0_risk_01", "expression": "trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.5, rank(-returns), -1)"},
+        {"template_id": "d0_risk_02", "expression": "rank(-returns) * rank(beta_last_60_days_spy)"},
+        {"template_id": "d0_risk_03", "expression": "rank((vwap - close) / (close + 0.001)) * rank(-unsystematic_risk_last_60_days)"},
+    ],
+}
+TEMPLATE_LIBRARY.update(DELAY0_TEMPLATES)
+DATASET_NEUTRALIZATION.update({
+    "delay0_open_gap_reversal": ["MARKET", "INDUSTRY", "SUBINDUSTRY", "NONE"],
+    "delay0_close_vwap_dislocation": ["MARKET", "INDUSTRY", "SUBINDUSTRY", "NONE"],
+    "delay0_range_position": ["MARKET", "INDUSTRY", "SUBINDUSTRY", "NONE"],
+    "delay0_volume_shock": ["MARKET", "INDUSTRY", "SUBINDUSTRY", "NONE"],
+    "delay0_liquidity_pressure": ["MARKET", "INDUSTRY", "SUBINDUSTRY", "NONE"],
+    "delay0_options_intraday": ["MARKET", "INDUSTRY", "SUBINDUSTRY", "NONE"],
+    "delay0_news_reaction": ["MARKET", "INDUSTRY", "SUBINDUSTRY", "NONE"],
+    "delay0_risk_intraday": ["MARKET", "INDUSTRY", "SUBINDUSTRY", "NONE"],
+})
+
 # ══════════════════════════════════════════════════════════════
 # v7.2: Merge research-backed mega template library (880 templates)
 # ══════════════════════════════════════════════════════════════
