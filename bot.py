@@ -1214,6 +1214,31 @@ class AlphaBot:
                 )
                 pending_variants.append((desc, variant_settings))
 
+            # v7.2.6: Force-inject a d=0 variant if expression is safe and Optuna
+            # didn't suggest one. d=0 alphas live in a separate self-correlation
+            # space — even at 1/3 score multiplier they often land when d=1 doesn't
+            # because the saturated portfolio is mostly d=1.
+            try:
+                from settings_optimizer import _delay_choices_for_expression
+                d0_safe = 0 in _delay_choices_for_expression(expression)
+            except Exception:
+                d0_safe = False
+
+            has_d0 = any(s.get("delay") == 0 for _, s in pending_variants)
+            if d0_safe and not has_d0 and pending_variants:
+                # Take the best-looking variant and clone it with delay=0
+                _, base_v = pending_variants[0]
+                d0_variant = {**base_v, "delay": 0}
+                d0_desc = (
+                    f"{d0_variant.get('universe','?')}/"
+                    f"{d0_variant.get('neutralization','?')}/"
+                    f"decay{d0_variant.get('decay','?')}/"
+                    f"delay0/"
+                    f"t{d0_variant.get('truncation','?')} (forced d0)"
+                )
+                pending_variants.append((d0_desc, d0_variant))
+                print(f"  [FORCED_D0] Injected delay=0 variant for portfolio diversity")
+
             # Drain in-flight sims first so we have full concurrent capacity
             import time as _time
             if self.scheduler.running:
@@ -1512,11 +1537,28 @@ class AlphaBot:
         else:
             # No positive change found
             unknown = [v for v in variants if v["change"] is None]
-            # v7.2.1: Split negatives into "marginal" (-10 to 0) and "truly negative" (< -10).
-            # Marginal alphas stay in ready_alphas — portfolio shifts after other submissions
-            # might push them positive. Only truly negative cores get blocked.
-            marginal = [v for v in variants if v["change"] is not None and -10 <= v["change"] < 0]
-            truly_negative = [v for v in variants if v["change"] is not None and v["change"] < -10]
+            # v7.2.6: Loosened thresholds. Was: marginal=-10..0, truly_negative=<-10.
+            # New: marginal=-25..0 plus any alpha with Sharpe>=1.6 regardless of score
+            # (high-Sharpe alphas score change can flip positive after a few portfolio
+            # shifts). truly_negative cutoff at -25 means we trade fewer SCORE_NEG_BLOCKs
+            # for more flexibility — many alphas at -15 to -25 today recover to +5..+30
+            # after the portfolio rotates.
+            STAGING_FLOOR = -25
+            HIGH_SHARPE_RESCUE = 1.6
+            marginal = [
+                v for v in variants
+                if v["change"] is not None
+                and (
+                    (STAGING_FLOOR <= v["change"] < 0)
+                    or (v["change"] < STAGING_FLOOR and v.get("sharpe", 0) >= HIGH_SHARPE_RESCUE)
+                )
+            ]
+            truly_negative = [
+                v for v in variants
+                if v["change"] is not None
+                and v["change"] < STAGING_FLOOR
+                and v.get("sharpe", 0) < HIGH_SHARPE_RESCUE
+            ]
 
             if unknown:
                 # v7.2.1: Stage ALL unknown variants, not just the best.
@@ -1586,7 +1628,7 @@ class AlphaBot:
                 )
             elif truly_negative:
                 print(
-                    f"\n  📉 ALL {len(truly_negative)} variants scored < -10 — skipping.\n"
+                    f"\n  📉 ALL {len(truly_negative)} variants scored < -25 (and S<1.6) — skipping.\n"
                     f"{'='*60}\n"
                 )
                 # v6.2: Block further refinement of this core — it hurts the portfolio

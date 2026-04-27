@@ -49,7 +49,7 @@ DELAY0_REFINE_PROBABILITY = 0.05
 # mutation of the Delay 1 search. These probabilities control fresh template
 # generation only; combiner/evolver stay Delay 1 unless explicitly upgraded
 # later with their own delay-aware pools.
-DELAY0_TEMPLATE_PROBABILITY = 0.06
+DELAY0_TEMPLATE_PROBABILITY = 0.0  # v7.2.6: disabled — 170 sims, 0 eligible. Specialist d0 templates produce sub-1.25 Sharpe. d0 alphas now come ONLY from Optuna sweeps of already-eligible d1 cores.
 DELAY0_TEMPLATE_FAMILIES = {
     "delay0_open_gap_reversal",
     "delay0_close_vwap_dislocation",
@@ -518,7 +518,7 @@ PREFER_TS_MEAN_WINDOW = [3, 5, 10]
 
 # v5.6: LLM generation
 # v6.2.1: Bumped to 0.30 — LLM now has portfolio-additive focus prompt
-LLM_GENERATION_PROBABILITY = 0.10  # v7.2: Reduced from 0.30 — research templates are primary now
+LLM_GENERATION_PROBABILITY = 0.30  # v7.2.6: boosted from 0.10 — only source of structurally orthogonal alphas. Portfolio is saturated against template-based generation, need LLM diversity to break out.
 
 # v6.2.1: Signal combination — DOUBLED from 0.10 — combos with additive bias are the
 # most likely path to positive score changes
