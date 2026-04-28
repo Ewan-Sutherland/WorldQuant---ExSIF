@@ -180,9 +180,12 @@ class CoordinatedSubmitPipeline:
             a["live_score"] = score
 
             # Write score to Supabase so coordinator can read it
+            # v7.2.7: Use config.STAGING_FLOOR (-25) instead of hardcoded -10.
+            # Old code silently rejected valid marginal alphas at score=-15..-25.
             try:
+                _floor = getattr(self.config, "STAGING_FLOOR", -25)
                 new_status = "ready" if score is not None and score >= 0 else (
-                    "rejected" if score is not None and score < -10 else
+                    "rejected" if score is not None and score < _floor else
                     "ready" if score is not None else "unverified"
                 )
                 self.storage._patch("ready_alphas", {"id": a["id"]}, {
@@ -212,7 +215,7 @@ class CoordinatedSubmitPipeline:
                         a["live_score"] = score
                         self.storage._patch("ready_alphas", {"id": a["id"]}, {
                             "score_change": score,
-                            "status": "ready" if score >= -10 else "rejected",
+                            "status": "ready" if score >= getattr(self.config, "STAGING_FLOOR", -25) else "rejected",
                         })
                         print(f"    ✅ {a.get('family','')} S={a.get('sharpe',0):.2f} → {score:+.0f}")
                 except Exception:
@@ -602,9 +605,28 @@ class CoordinatedSubmitPipeline:
         return all_positive
 
     def _submit_alpha(self, alpha: dict) -> bool:
-        """Submit a single alpha to WQ. Returns True if accepted."""
+        """Submit a single alpha to WQ. Returns True if accepted.
+
+        v7.2.7: Defense-in-depth score guard. Callers ALSO filter by
+        score >= SUBMIT_MIN_SCORE, but this is the final boundary before a
+        WQ submission. If a participant receives a stale submit_command from
+        the coordinator (or any other code path slips through), this guard
+        prevents a negative-score alpha from ever reaching WQ.
+        """
         alpha_id = alpha.get("alpha_id")
         if not alpha_id:
+            return False
+
+        # v7.2.7: Hard score floor — never submit anything below SUBMIT_MIN_SCORE.
+        # Single source of truth from config so the rule can be tuned in one place.
+        min_score = getattr(self.config, "SUBMIT_MIN_SCORE", 15)
+        score = alpha.get("score_change")
+        if score is None or float(score) < min_score:
+            print(
+                f"    🛑 [SCORE_GUARD] Refusing to submit alpha_id={alpha_id} "
+                f"score={score} < min_score={min_score} "
+                f"(family={alpha.get('family','?')})"
+            )
             return False
 
         try:
@@ -666,9 +688,11 @@ class CoordinatedSubmitPipeline:
                 )
                 score = perf.get("_score_change")
                 if score is not None:
+                    # v7.2.7: Use config.STAGING_FLOOR (-25) not hardcoded -10
+                    _floor = getattr(self.config, "STAGING_FLOOR", -25)
                     self.storage._patch("ready_alphas", {"id": a["id"]}, {
                         "score_change": score,
-                        "status": "ready" if score >= -10 else "rejected",
+                        "status": "ready" if score >= _floor else "rejected",
                     })
                     direction = "+" if score > 0 else ""
                     print(f"    {a.get('family','')}/{a.get('template_id','')} "
@@ -824,7 +848,7 @@ class CoordinatedSubmitPipeline:
                     # check_alpha_id column may not exist, so patch it separately.
                     self.storage._patch("ready_alphas", {"id": a["id"]}, {
                         "score_change": score,
-                        "status": "ready" if score >= -10 else "rejected",
+                        "status": "ready" if score >= getattr(self.config, "STAGING_FLOOR", -25) else "rejected",
                     })
                     # Separately try to persist check_alpha_id for cross-shard rechecks.
                     # If column doesn't exist, _patch returns None silently — rechecks
@@ -955,7 +979,7 @@ class CoordinatedSubmitPipeline:
                 try:
                     self.storage._patch("ready_alphas", {"id": a["id"]}, {
                         "score_change": score,
-                        "status": "ready" if score >= -10 else "rejected",
+                        "status": "ready" if score >= getattr(self.config, "STAGING_FLOOR", -25) else "rejected",
                     })
                 except Exception:
                     pass
@@ -1001,7 +1025,7 @@ class CoordinatedSubmitPipeline:
                 if score is not None:
                     self.storage._patch("ready_alphas", {"id": a["id"]}, {
                         "score_change": score,
-                        "status": "ready" if score >= -10 else "rejected",
+                        "status": "ready" if score >= getattr(self.config, "STAGING_FLOOR", -25) else "rejected",
                     })
                     direction = "+" if score > 0 else ""
                     print(f"    [proxy] {a.get('family','')}/{a.get('template_id','')} "

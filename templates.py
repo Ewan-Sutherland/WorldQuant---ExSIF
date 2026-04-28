@@ -1149,7 +1149,7 @@ V727_NEW_TEMPLATES = {
         {"template_id": "mtc_03", "expression": "rank(sign(ts_delta(close, 5)) + sign(ts_delta(close, 20)) + sign(ts_delta(close, 60)))"},
         {"template_id": "mtc_04", "expression": "trade_when(sign(ts_zscore(volume, 10)) == sign(ts_zscore(volume, 60)), rank(-returns), -1)"},
         {"template_id": "mtc_05", "expression": "rank(sign(ts_delta({field}, 20)) * sign(ts_delta({field}, 60)))"},
-        {"template_id": "mtc_06", "expression": "trade_when(ts_rank(returns, 5) > 0.7 && ts_rank(returns, 60) > 0.7, rank(-returns), -1)"},
+        {"template_id": "mtc_06", "expression": "trade_when(and(ts_rank(returns, 5) > 0.7, ts_rank(returns, 60) > 0.7), rank(-returns), -1)"},
     ],
 
     # ─── 5. RANK STABILITY ───

@@ -60,10 +60,10 @@ DELAY0_TEMPLATE_FAMILIES = {
     "delay0_news_reaction",
     "delay0_risk_intraday",
 }
-DELAY0_UNIVERSES = ["TOP3000", "TOP1000", "TOP500"]
+DELAY0_UNIVERSES = ["TOP3000", "TOP1000", "TOP500", "TOP200", "TOPSP500"]  # v7.2.7: added TOP200 and TOPSP500. TOPSP500 is highly liquid which suits d=0; TOP200 helps target high-volume names.
 DELAY0_NEUTRALIZATIONS = ["MARKET", "INDUSTRY", "SUBINDUSTRY", "NONE"]
 DELAY0_DECAYS = [0, 1, 2, 3, 5]
-DELAY0_TRUNCATIONS = [0.01, 0.03, 0.05, 0.08]
+DELAY0_TRUNCATIONS = [0.01, 0.03, 0.05, 0.08, 0.10]  # v7.2.7: added 0.10 to match d1 truncation grid
 
 # Delay 0 alphas should not be bred with Delay 1 populations by default.
 # This avoids accidentally turning a slow Delay 1 composite into a noisy
@@ -85,8 +85,8 @@ DELAY0_FAMILY_BOOST = {
 }
 DEFAULT_UNIVERSES = ["TOP3000", "TOP1000", "TOP500", "TOP200", "TOPSP500"]
 DEFAULT_NEUTRALIZATIONS = ["SUBINDUSTRY", "INDUSTRY", "SECTOR", "MARKET", "NONE"]
-DEFAULT_DECAYS = [2, 4, 6, 8, 10, 12]
-DEFAULT_TRUNCATIONS = [0.03, 0.05, 0.08, 0.10]
+DEFAULT_DECAYS = [0, 2, 4, 6, 8, 10, 12]  # v7.2.7: added 0 (no-decay). Some alphas perform best raw — Optuna already explores this; mutator now matches.
+DEFAULT_TRUNCATIONS = [0.01, 0.03, 0.05, 0.08, 0.10]  # v7.2.7: added 0.01 (tightest). Improves Sharpe on concentrated alphas; Optuna already explores this; mutator now matches.
 
 DEFAULT_INSTRUMENT_TYPE = "EQUITY"
 DEFAULT_VISUALIZATION = False
@@ -171,6 +171,13 @@ SUBMIT_SCHEDULE = {
 SUBMIT_MINUTE = 30  # Fire at :30 past the hour
 # Minimum score change to auto-submit (avoids marginal alphas flipping negative)
 SUBMIT_MIN_SCORE = 15  # v7.2.1: Lowered from 20 — low-positive alphas stay in ready_alphas and can grow after other submissions shift the portfolio
+# v7.2.7: Single source of truth for the negative-score floor below which alphas
+# get marked rejected (instead of staying in ready_alphas as marginal). Was hardcoded
+# as -10 in 6 places across coordinated_submit.py / submit_pipeline.py / bot.py,
+# inconsistent with bot.py's STAGING_FLOOR=-25 — silently rejecting valid marginal
+# alphas during rechecks.
+STAGING_FLOOR = -25
+HIGH_SHARPE_RESCUE = 1.6  # Sharpe at/above this stages even if score < STAGING_FLOOR
 
 # v6.2: Number of Optuna settings variants to try per eligible alpha
 OPTIMIZE_VARIANTS = 5

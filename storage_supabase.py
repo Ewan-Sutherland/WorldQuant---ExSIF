@@ -648,50 +648,75 @@ class Storage:
     # ── v6.0: Optuna warm-start data retrieval ────────────────────────
 
     def get_runs_for_expression(self, expression: str) -> list[dict]:
-        """Get all completed runs for a specific expression with settings and metrics."""
-        # Step 1: Find candidates with this exact expression
+        """Get completed runs for a specific expression with full settings + metrics.
+
+        v7.2.7: Replaced N+1 query pattern (50 candidates × 20 runs × 1 metric =
+        up to 1,001 DB calls) with 3 batch queries using PostgREST IN filters.
+        Called on every Optuna warm-start (~30+/day per bot), so this was a
+        major source of latency and DB load.
+        """
+        # Step 1: Find candidates matching this expression
         cands = self._get("candidates", {
-            "select": "candidate_id,settings_json",
+            "select": "candidate_id,settings_json,canonical_expression",
             "canonical_expression": f"eq.{expression}",
             "limit": "50",
         })
         if not cands:
             return []
 
+        # Step 2: Batch-fetch all completed runs for these candidates in ONE call
+        cand_id_csv = ",".join(c["candidate_id"] for c in cands)
+        runs = self._get("runs", {
+            "select": "run_id,candidate_id",
+            "candidate_id": f"in.({cand_id_csv})",
+            "status": "eq.completed",
+            "limit": "1000",
+        })
+        if not runs:
+            return []
+
+        # Step 3: Batch-fetch all metrics for these runs in ONE call
+        run_id_csv = ",".join(r["run_id"] for r in runs)
+        mets_rows = self._get("metrics", {
+            "select": "run_id,sharpe,fitness,turnover",
+            "run_id": f"in.({run_id_csv})",
+            "limit": "1000",
+        })
+
+        # Build a lookup: run_id -> metrics row
+        mets_by_run = {m["run_id"]: m for m in mets_rows}
+        # Build a lookup: candidate_id -> settings dict
+        import json as _json
+        cands_by_id = {}
+        for c in cands:
+            sj = c.get("settings_json")
+            settings = _json.loads(sj) if isinstance(sj, str) else (sj or {})
+            cands_by_id[c["candidate_id"]] = settings
+
+        # Assemble results
         results = []
-        for cand in cands:
-            cid = cand["candidate_id"]
-            # Step 2: Find completed runs for this candidate
-            runs = self._get("runs", {
-                "select": "run_id",
-                "candidate_id": f"eq.{cid}",
-                "status": "eq.completed",
-                "limit": "20",
+        for run in runs:
+            mets = mets_by_run.get(run["run_id"])
+            if not mets:
+                continue
+            settings = cands_by_id.get(run["candidate_id"], {})
+            results.append({
+                "run_id": run["run_id"],
+                "settings_json": settings,
+                "sharpe": mets.get("sharpe"),
+                "fitness": mets.get("fitness"),
+                "turnover": mets.get("turnover"),
             })
-            for run in runs:
-                rid = run["run_id"]
-                # Step 3: Get metrics
-                mets = self._get("metrics", {
-                    "select": "sharpe,fitness,turnover",
-                    "run_id": f"eq.{rid}",
-                    "limit": "1",
-                })
-                if mets:
-                    import json as _json
-                    sj = cand.get("settings_json")
-                    settings = _json.loads(sj) if isinstance(sj, str) else (sj or {})
-                    results.append({
-                        "run_id": rid,
-                        "settings_json": settings,
-                        "sharpe": mets[0].get("sharpe"),
-                        "fitness": mets[0].get("fitness"),
-                        "turnover": mets[0].get("turnover"),
-                    })
         return results
 
     def get_runs_for_core_signal(self, core_signal: str) -> list[dict]:
-        """Get completed runs whose expression contains the core signal."""
-        # PostgREST LIKE query
+        """Get completed runs whose expression contains the core signal.
+
+        v7.2.7: Replaced N+1 query pattern with batch IN-filter queries.
+        Was: 30 candidates × 10 runs × 1 metric = up to 301 DB calls per call.
+        Now: 3 batch queries regardless of candidate count.
+        """
+        # PostgREST LIKE query for candidates
         cands = self._get("candidates", {
             "select": "candidate_id,settings_json,canonical_expression",
             "canonical_expression": f"like.*{core_signal[:40]}*",
@@ -700,39 +725,57 @@ class Storage:
         if not cands:
             return []
 
+        # Batch fetch runs
+        cand_id_csv = ",".join(c["candidate_id"] for c in cands)
+        runs = self._get("runs", {
+            "select": "run_id,candidate_id",
+            "candidate_id": f"in.({cand_id_csv})",
+            "status": "eq.completed",
+            "limit": "300",
+        })
+        if not runs:
+            return []
+
+        # Batch fetch metrics (only useful ones — fitness present)
+        run_id_csv = ",".join(r["run_id"] for r in runs)
+        mets_rows = self._get("metrics", {
+            "select": "run_id,sharpe,fitness,turnover",
+            "run_id": f"in.({run_id_csv})",
+            "limit": "300",
+        })
+
+        mets_by_run = {m["run_id"]: m for m in mets_rows}
+        import json as _json
+        cands_by_id = {}
+        for c in cands:
+            sj = c.get("settings_json")
+            settings = _json.loads(sj) if isinstance(sj, str) else (sj or {})
+            cands_by_id[c["candidate_id"]] = settings
+
         results = []
-        for cand in cands:
-            cid = cand["candidate_id"]
-            runs = self._get("runs", {
-                "select": "run_id",
-                "candidate_id": f"eq.{cid}",
-                "status": "eq.completed",
-                "limit": "10",
+        for run in runs:
+            mets = mets_by_run.get(run["run_id"])
+            if not mets or not mets.get("fitness"):
+                continue
+            settings = cands_by_id.get(run["candidate_id"], {})
+            results.append({
+                "run_id": run["run_id"],
+                "settings_json": settings,
+                "sharpe": mets.get("sharpe"),
+                "fitness": mets.get("fitness"),
+                "turnover": mets.get("turnover"),
             })
-            for run in runs:
-                rid = run["run_id"]
-                mets = self._get("metrics", {
-                    "select": "sharpe,fitness,turnover",
-                    "run_id": f"eq.{rid}",
-                    "limit": "1",
-                })
-                if mets and mets[0].get("fitness"):
-                    import json as _json
-                    sj = cand.get("settings_json")
-                    settings = _json.loads(sj) if isinstance(sj, str) else (sj or {})
-                    results.append({
-                        "run_id": rid,
-                        "settings_json": settings,
-                        "sharpe": mets[0].get("sharpe"),
-                        "fitness": mets[0].get("fitness"),
-                        "turnover": mets[0].get("turnover"),
-                    })
-                    if len(results) >= 30:
-                        return results
+            if len(results) >= 30:
+                break
         return results
 
     def get_runs_for_family(self, family: str) -> list[dict]:
-        """Get top completed runs from same family for cross-pollination."""
+        """Get top completed runs from same family for cross-pollination.
+
+        v7.2.7: Replaced N+1 query pattern with batch IN-filter queries.
+        Was: 50 candidates × 5 runs × 1 metric = up to 251 DB calls.
+        Now: 3 batch queries.
+        """
         cands = self._get("candidates", {
             "select": "candidate_id,settings_json",
             "family": f"eq.{family}",
@@ -741,35 +784,46 @@ class Storage:
         if not cands:
             return []
 
+        cand_id_csv = ",".join(c["candidate_id"] for c in cands)
+        runs = self._get("runs", {
+            "select": "run_id,candidate_id",
+            "candidate_id": f"in.({cand_id_csv})",
+            "status": "eq.completed",
+            "limit": "250",
+        })
+        if not runs:
+            return []
+
+        run_id_csv = ",".join(r["run_id"] for r in runs)
+        mets_rows = self._get("metrics", {
+            "select": "run_id,sharpe,fitness,turnover",
+            "run_id": f"in.({run_id_csv})",
+            "limit": "250",
+        })
+
+        mets_by_run = {m["run_id"]: m for m in mets_rows}
+        import json as _json
+        cands_by_id = {}
+        for c in cands:
+            sj = c.get("settings_json")
+            settings = _json.loads(sj) if isinstance(sj, str) else (sj or {})
+            cands_by_id[c["candidate_id"]] = settings
+
         results = []
-        for cand in cands:
-            cid = cand["candidate_id"]
-            runs = self._get("runs", {
-                "select": "run_id",
-                "candidate_id": f"eq.{cid}",
-                "status": "eq.completed",
-                "limit": "5",
+        for run in runs:
+            mets = mets_by_run.get(run["run_id"])
+            if not mets or (mets.get("fitness") or 0) <= 0.5:
+                continue
+            settings = cands_by_id.get(run["candidate_id"], {})
+            results.append({
+                "run_id": run["run_id"],
+                "settings_json": settings,
+                "sharpe": mets.get("sharpe"),
+                "fitness": mets.get("fitness"),
+                "turnover": mets.get("turnover"),
             })
-            for run in runs:
-                rid = run["run_id"]
-                mets = self._get("metrics", {
-                    "select": "sharpe,fitness,turnover",
-                    "run_id": f"eq.{rid}",
-                    "limit": "1",
-                })
-                if mets and (mets[0].get("fitness") or 0) > 0.5:
-                    import json as _json
-                    sj = cand.get("settings_json")
-                    settings = _json.loads(sj) if isinstance(sj, str) else (sj or {})
-                    results.append({
-                        "run_id": rid,
-                        "settings_json": settings,
-                        "sharpe": mets[0].get("sharpe"),
-                        "fitness": mets[0].get("fitness"),
-                        "turnover": mets[0].get("turnover"),
-                    })
-                    if len(results) >= 30:
-                        return results
+            if len(results) >= 30:
+                break
         return results
 
     def get_concentrated_weight_failures(self, *, limit: int = 500) -> list[str]:

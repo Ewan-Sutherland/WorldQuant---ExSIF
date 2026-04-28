@@ -307,7 +307,7 @@ class AlphaGenerator:
             settings=settings,
         )
 
-    def _is_oversaturated(self, expr: str) -> bool:
+    def _is_oversaturated(self, expr: str, is_delay0: bool = False) -> bool:
         """v7.2.6: Reject expressions that use saturated fields OR shapes heavily.
 
         Two ways an expression can be saturated:
@@ -324,6 +324,12 @@ class AlphaGenerator:
         The STRUCTURAL check is probabilistic: 75% reject rate, 25% allow,
         so we still occasionally explore in case a specific field genuinely
         breaks the correlation. That's the price of NOT being too rigid.
+
+        v7.2.7: is_delay0 flag — when True, skip the field saturation check
+        because _SATURATED_FIELDS is derived from the d=1-dominant portfolio,
+        and d=0 lives in a separate self-correlation space. The structural
+        check still applies because over-used shapes are likely over-used
+        regardless of delay (we just don't have d=0 portfolio data yet).
         """
         try:
             from datasets import _SATURATED_FIELDS
@@ -332,14 +338,16 @@ class AlphaGenerator:
         expr_l = expr.lower()
 
         # === FIELD SATURATION CHECK ===
-        sat_count = 0
-        for fld in _SATURATED_FIELDS:
-            if fld in expr_l:
-                if expr_l.count(fld) >= 2:
-                    return True
-                sat_count += 1
-                if sat_count >= 2:
-                    return True
+        # v7.2.7: Skip for d=0 — saturation list is d=1 portfolio-derived
+        if not is_delay0:
+            sat_count = 0
+            for fld in _SATURATED_FIELDS:
+                if fld in expr_l:
+                    if expr_l.count(fld) >= 2:
+                        return True
+                    sat_count += 1
+                    if sat_count >= 2:
+                        return True
 
         # === STRUCTURAL SATURATION CHECK ===
         # These shapes dominate the existing portfolio but ARE still landing

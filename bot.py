@@ -790,9 +790,21 @@ class AlphaBot:
         if candidate_row_check:
             is_sweep = str(candidate_row_check.get("template_id", "")).startswith("sweep_")
             core = self._extract_core_signal(candidate_row_check.get("canonical_expression", ""))
-            if core and core in self.rejected_cores and not is_sweep:
+            # v7.2.7: Don't block d=0 candidates based on d=1 historical rejections.
+            # rejected_cores/score_negative_cores are populated from team submissions
+            # which are predominantly d=1, and d=0 lives in a separate self-corr space
+            # with a smaller portfolio. Letting d=0 candidates through means we might
+            # waste 1 sim if it also fails — but missing a potential d=0 alpha that
+            # would have passed costs much more.
+            try:
+                _settings_str = candidate_row_check.get("settings_json", "{}")
+                _settings = _json.loads(_settings_str) if isinstance(_settings_str, str) else (_settings_str or {})
+                _is_d0 = int(_settings.get("delay", 1)) == 0
+            except Exception:
+                _is_d0 = False
+            if core and core in self.rejected_cores and not is_sweep and not _is_d0:
                 return
-            if core and core in self._score_negative_cores and not is_sweep:
+            if core and core in self._score_negative_cores and not is_sweep and not _is_d0:
                 return
 
         # v6.1: Eligible alphas get settings-only refinement to find optimal version
@@ -1069,10 +1081,23 @@ class AlphaBot:
         core = self._extract_core_signal(expression)
         family = candidate_row.get("family", "")
 
+        # v7.2.7: Parse delay early so we can skip d=1 core blocklists for d=0
+        # candidates (d=0 lives in a separate self-correlation space).
+        try:
+            settings_json = candidate_row.get("settings_json", "{}")
+            if isinstance(settings_json, str):
+                settings_dict = _json.loads(settings_json) if settings_json else {}
+            else:
+                settings_dict = settings_json or {}
+            is_delay0 = int(settings_dict.get("delay", 1)) == 0
+        except Exception:
+            is_delay0 = False
+
         # Skip if core already rejected by self-correlation
         # v7.2: Sweeps also skip — same core = same correlation regardless of settings
+        # v7.2.7: d=0 candidates skip this block — d=0 self-corr space is separate.
         is_sweep = str(candidate_row.get("template_id", "")).startswith("sweep_")
-        if core and core in self.rejected_cores:
+        if core and core in self.rejected_cores and not is_delay0:
             print(
                 f"[OPTIMIZE_SKIP_CORR] run_id={run_id} "
                 f"core='{core[:60]}' — already rejected by WQ"
@@ -1085,16 +1110,6 @@ class AlphaBot:
         # candidates from S>=1.65 — they have a realistic shot at hitting the 2.0 bar
         # via a sibling variant. Below 1.65, the gap is too big to bridge.
         # IMPORTANT: d=1 candidates pass through unchanged (their bar is still 1.25).
-        try:
-            settings_json = candidate_row.get("settings_json", "{}")
-            if isinstance(settings_json, str):
-                settings_dict = _json.loads(settings_json) if settings_json else {}
-            else:
-                settings_dict = settings_json or {}
-            is_delay0 = int(settings_dict.get("delay", 1)) == 0
-        except Exception:
-            is_delay0 = False
-
         if is_delay0 and metrics.sharpe < 1.65:
             print(
                 f"[OPTIMIZE_SKIP_D0_LOW_SHARPE] run_id={run_id} "
@@ -1213,21 +1228,24 @@ class AlphaBot:
             generated = 0
 
             # v6.2.1: Collect all variant settings first, then simulate in parallel batches of 3
+            # v7.2.7: Use suggest_batch (single Optuna study generating N variants)
+            # instead of looping suggest() — old approach created N independent studies
+            # that all converged to the same TPE recommendation when warm-start data
+            # was clustered, producing duplicates.
             pending_variants = []
             skipped_variants = []
-            for i in range(n_variants * 3):
-                if len(pending_variants) >= n_variants:
-                    break
 
-                suggestion = self.settings_optimizer.suggest(
-                    expression=expression,
-                    core_signal=core or "",
-                    family=family,
-                )
+            optuna_suggestions = self.settings_optimizer.suggest_batch(
+                expression=expression,
+                n=n_variants,
+                core_signal=core or "",
+                family=family,
+            )
 
-                if suggestion is None:
-                    break
+            if not optuna_suggestions:
+                print(f"  ⚠️ No Optuna suggestions returned — skipping variant generation")
 
+            for suggestion in optuna_suggestions:
                 combo_key = (
                     suggestion.get("universe"),
                     suggestion.get("neutralization"),
@@ -1497,7 +1515,21 @@ class AlphaBot:
                 f"S={best['sharpe']:.2f} F={best['fitness']:.2f}"
             )
 
-            if config.AUTO_SUBMIT:
+            # v7.2.7: Belt-and-braces score floor at the boundary even though
+            # `positive` already filters change >= 0 and AUTO_SUBMIT defaults
+            # to False. Never submit anything below SUBMIT_MIN_SCORE.
+            _min_score = getattr(config, "SUBMIT_MIN_SCORE", 15)
+            should_auto_submit = (
+                config.AUTO_SUBMIT
+                and (best.get("change") or 0) >= _min_score
+            )
+            if config.AUTO_SUBMIT and not should_auto_submit:
+                print(
+                    f"  🛑 [SCORE_GUARD] Refusing to auto-submit "
+                    f"score={best.get('change')} < min_score={_min_score}"
+                )
+
+            if should_auto_submit:
                 # Submit directly to WQ
                 print(f"  Submitting alpha_id={best['alpha_id']}...")
                 sub_result = self.client.submit_alpha(best["alpha_id"])
@@ -1596,8 +1628,9 @@ class AlphaBot:
             # shifts). truly_negative cutoff at -25 means we trade fewer SCORE_NEG_BLOCKs
             # for more flexibility — many alphas at -15 to -25 today recover to +5..+30
             # after the portfolio rotates.
-            STAGING_FLOOR = -25
-            HIGH_SHARPE_RESCUE = 1.6
+            # v7.2.7: Now read from config so all threshold sites stay in sync.
+            STAGING_FLOOR = getattr(config, "STAGING_FLOOR", -25)
+            HIGH_SHARPE_RESCUE = getattr(config, "HIGH_SHARPE_RESCUE", 1.6)
             marginal = [
                 v for v in variants
                 if v["change"] is not None
@@ -2594,7 +2627,7 @@ class AlphaBot:
 
         # v7.2.6: Check saturation - reject if expression uses 2+ saturated fields.
         # These almost always score negative against the existing portfolio.
-        if self.generator._is_oversaturated(candidate.expression):
+        if self.generator._is_oversaturated(candidate.expression, is_delay0=getattr(candidate.settings, "delay", 1) == 0):
             print(f"[LLM_SATURATED] expr={expr[:80]} — uses 2+ portfolio-saturated fields")
             return None
 
@@ -2645,7 +2678,7 @@ class AlphaBot:
             return None
 
         # v7.2.6: Saturation check
-        if self.generator._is_oversaturated(candidate.expression):
+        if self.generator._is_oversaturated(candidate.expression, is_delay0=getattr(candidate.settings, "delay", 1) == 0):
             print(f"[COMBO_SATURATED] expr={expr[:80]}")
             return None
 
@@ -2690,7 +2723,7 @@ class AlphaBot:
             return None
 
         # v7.2.6: Saturation check
-        if self.generator._is_oversaturated(candidate.expression):
+        if self.generator._is_oversaturated(candidate.expression, is_delay0=getattr(candidate.settings, "delay", 1) == 0):
             print(f"[EVOLVE_SATURATED] expr={expr[:80]}")
             return None
 
@@ -2735,7 +2768,7 @@ class AlphaBot:
 
         # v7.2.6: Saturation check — gap mining shouldn't combine new fields with
         # already-saturated ones (e.g. ts_backfill(novel_field, 60) * rank(operating_income))
-        if self.generator._is_oversaturated(candidate.expression):
+        if self.generator._is_oversaturated(candidate.expression, is_delay0=getattr(candidate.settings, "delay", 1) == 0):
             return None  # Silent skip
 
         # Override family/template to track gap mining performance
@@ -2806,8 +2839,17 @@ class AlphaBot:
 
                 # v6.2: Skip if core already rejected by WQ self-correlation
                 # v6.2.1: EXCEPT sweep candidates — different universes may pass
+                # v7.2.7: ALSO skip the block for d=0 refinements — d=0 lives in
+                # a separate self-corr space, so d=1 SC rejections don't apply.
                 is_sweep_refine = str(refinement_row.get("template_id", "")).startswith("sweep_")
-                if core and core in self.rejected_cores and not is_sweep_refine:
+                try:
+                    _refine_settings_str = refinement_row.get("settings_json", "{}")
+                    _refine_settings = _json.loads(_refine_settings_str) if isinstance(_refine_settings_str, str) else (_refine_settings_str or {})
+                    _refine_is_d0 = int(_refine_settings.get("delay", 1)) == 0
+                except Exception:
+                    _refine_is_d0 = False
+
+                if core and core in self.rejected_cores and not is_sweep_refine and not _refine_is_d0:
                     self.storage.mark_refinement_consumed(base_candidate_id)
                     self._active_refinement_ids.discard(base_candidate_id)
                     print(f"[REFINE_SKIP_CORR] core='{core[:60]}' — already rejected by WQ, skipping refinement")
@@ -2815,7 +2857,8 @@ class AlphaBot:
 
                 # v6.2: Skip if core already produced negative score changes
                 # v6.2.1: EXCEPT sweep candidates — different universes may have positive score change
-                if core and core in self._score_negative_cores and not is_sweep_refine:
+                # v7.2.7: ALSO skip the block for d=0 refinements (different scoring space)
+                if core and core in self._score_negative_cores and not is_sweep_refine and not _refine_is_d0:
                     self.storage.mark_refinement_consumed(base_candidate_id)
                     self._active_refinement_ids.discard(base_candidate_id)
                     print(f"[REFINE_SKIP_SCORE] core='{core[:60]}' — negative score change, skipping refinement")
@@ -3079,7 +3122,11 @@ class AlphaBot:
             # v6.2: Hard-block candidates sharing core with 2+ already-submitted alphas.
             # WQ's self-correlation check almost always rejects variants of well-covered cores.
             # Saves ~15-20 wasted sims per overnight run.
-            if self.passed_cores:
+            # v7.2.7: d=0 candidates skip this block — passed_cores tracks team
+            # submissions which are predominantly d=1, and d=0 lives in a separate
+            # self-corr space. We'd be over-blocking valid d=0 alphas otherwise.
+            _cand_is_d0 = getattr(candidate.settings, "delay", 1) == 0
+            if self.passed_cores and not _cand_is_d0:
                 core = self._extract_core_signal(candidate.canonical_expression)
                 if core and self.passed_cores.get(core, 0) >= 2:
                     print(

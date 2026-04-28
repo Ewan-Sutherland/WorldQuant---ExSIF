@@ -66,9 +66,12 @@ class SubmitPipeline:
         print("  Re-checking scores for all alphas...")
         alphas = self._recheck_scores(alphas)
 
-        # Step 3: Drop truly negative scores (< -10), keep marginal (-10 to 0) for recheck
+        # Step 3: Drop truly negative scores (< STAGING_FLOOR), keep marginal for recheck
+        # v7.2.7: Was hardcoded -10, now uses config.STAGING_FLOOR (-25). Old code
+        # silently rejected valid marginal alphas during recheck.
+        _floor = getattr(self.config, "STAGING_FLOOR", -25)
         positive = [a for a in alphas if a.get("live_score") is not None and a["live_score"] >= self.MIN_SCORE_TO_SUBMIT]
-        truly_negative = [a for a in alphas if a.get("live_score") is not None and a["live_score"] < -10]
+        truly_negative = [a for a in alphas if a.get("live_score") is not None and a["live_score"] < _floor]
         unknown = [a for a in alphas if a.get("live_score") is None]
 
         # v7.2: Retry unknowns once after a pause — API can be intermittent
@@ -93,7 +96,7 @@ class SubmitPipeline:
                               f"S={a.get('sharpe',0):.2f} → score: {direction}{score}")
                         if score >= self.MIN_SCORE_TO_SUBMIT:
                             positive.append(a)
-                        elif score < -10:
+                        elif score < _floor:
                             truly_negative.append(a)
                     else:
                         still_unknown.append(a)
@@ -133,9 +136,9 @@ class SubmitPipeline:
                     print(f"\n  Re-checking {len(remaining)} remaining alphas...")
                     remaining = self._recheck_scores(remaining)
 
-                    # Drop anything that went truly negative (< -10)
+                    # Drop anything that went truly negative (< STAGING_FLOOR)
                     for a in remaining:
-                        if a.get("live_score") is not None and a["live_score"] < -10:
+                        if a.get("live_score") is not None and a["live_score"] < _floor:
                             self._mark_status(a, "rejected", f"went_negative={a['live_score']}")
                             rejected += 1
 
@@ -339,10 +342,28 @@ class SubmitPipeline:
     # ── Submission ────────────────────────────────────────────────
 
     def _submit_alpha(self, alpha: dict) -> bool:
-        """Submit a single alpha to WQ. Returns True if accepted."""
+        """Submit a single alpha to WQ. Returns True if accepted.
+
+        v7.2.7: Defense-in-depth score guard. The greedy loop in run() already
+        filters by live_score >= MIN_SCORE_TO_SUBMIT, but this guard is the
+        final boundary so the rule can never be bypassed by future refactors.
+        """
         alpha_id = alpha.get("alpha_id")
         if not alpha_id:
             print(f"     ❌ No alpha_id — cannot submit")
+            return False
+
+        # v7.2.7: Hard score floor — never submit anything below SUBMIT_MIN_SCORE.
+        min_score = getattr(self.config, "SUBMIT_MIN_SCORE", 15)
+        # submit_pipeline uses 'live_score' as the freshly-rechecked score
+        score = alpha.get("live_score")
+        if score is None:
+            score = alpha.get("score_change")
+        if score is None or float(score) < min_score:
+            print(
+                f"     🛑 [SCORE_GUARD] Refusing to submit alpha_id={alpha_id} "
+                f"score={score} < min_score={min_score}"
+            )
             return False
 
         print(f"     Submitting alpha_id={alpha_id}...")
