@@ -820,6 +820,25 @@ class AlphaBot:
         if sharpe < min_refinement_sharpe:
             return
 
+        # v7.2.6: d=0 alphas need S>=2.0 to actually submit on WQ. The refinement
+        # queue itself does settings sweeps that can lift Sharpe by 0.3-0.5, so
+        # accept d=0 candidates from S>=1.50 — they have a real chance to refine
+        # up into the submittable range. Below 1.50 the gap is too big.
+        # IMPORTANT: this only affects d=0 candidates. d=1 still uses the standard
+        # MIN_REFINEMENT_SHARPE (1.15).
+        try:
+            settings_for_d0 = result.get("settings", {})
+            if isinstance(settings_for_d0, str):
+                import json as _json_d0
+                settings_for_d0 = _json_d0.loads(settings_for_d0)
+            cand_is_d0 = int(settings_for_d0.get("delay", 1)) == 0
+        except Exception:
+            cand_is_d0 = False
+
+        if cand_is_d0 and sharpe < 1.50:
+            print(f"[D0_REFINE_SKIP] S={sharpe:.2f} < 1.50 (d0 refinement floor) — too far from d0 submission threshold 2.0")
+            return
+
         # v7.1: Block extreme-turnover expressions from refinement queue
         # Combos with turnover=1.0 produce inflated Sharpe (S=23+) but collapse
         # when any holding period is forced. Refining them wastes ~12 sims each.
@@ -1057,6 +1076,29 @@ class AlphaBot:
             print(
                 f"[OPTIMIZE_SKIP_CORR] run_id={run_id} "
                 f"core='{core[:60]}' — already rejected by WQ"
+            )
+            return
+
+        # v7.2.6: For delay=0 alphas, WQ requires Sharpe >= 2.0 to submit (vs 1.25 for d=1).
+        # OPTIMIZE generates 8 settings variants — historically Optuna can lift Sharpe
+        # by 0.3-0.5 through better neutralization/decay/truncation. So accept d=0
+        # candidates from S>=1.65 — they have a realistic shot at hitting the 2.0 bar
+        # via a sibling variant. Below 1.65, the gap is too big to bridge.
+        # IMPORTANT: d=1 candidates pass through unchanged (their bar is still 1.25).
+        try:
+            settings_json = candidate_row.get("settings_json", "{}")
+            if isinstance(settings_json, str):
+                settings_dict = _json.loads(settings_json) if settings_json else {}
+            else:
+                settings_dict = settings_json or {}
+            is_delay0 = int(settings_dict.get("delay", 1)) == 0
+        except Exception:
+            is_delay0 = False
+
+        if is_delay0 and metrics.sharpe < 1.65:
+            print(
+                f"[OPTIMIZE_SKIP_D0_LOW_SHARPE] run_id={run_id} "
+                f"S={metrics.sharpe:.2f} < 1.65 (d0 needs S>=2.0 to submit, refinement headroom too small)"
             )
             return
 
@@ -1358,6 +1400,17 @@ class AlphaBot:
                     print(
                         f"    ⚠️ Not eligible: S={v_metrics.sharpe:.2f} F={v_metrics.fitness:.2f} "
                         f"({v_metrics.fail_reason})"
+                    )
+                    continue
+
+                # v7.2.6: d=0 variants need S>=2.0 to actually submit on WQ.
+                # If a d=0 variant is eligible at the d=1 bar (S>=1.25) but below
+                # the d=0 bar, it'll fail at submission. Skip early.
+                v_is_d0 = int(vsettings.get("delay", 1)) == 0
+                if v_is_d0 and v_metrics.sharpe < 2.0:
+                    print(
+                        f"    ⚠️ {desc} — d=0 variant S={v_metrics.sharpe:.2f} "
+                        f"below d0 submission threshold 2.0 — skipping"
                     )
                     continue
 

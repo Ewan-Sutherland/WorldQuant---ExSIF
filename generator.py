@@ -62,6 +62,29 @@ DEFAULT_BASE_FAMILY_WEIGHTS = {
     "fresh_fundamental": 5.0,   # Fresh fields, proven patterns
     "fresh_estimates": 5.0,     # Fresh estimate fields
     "model77_novel": 5.5,       # 3,238 untouched model77 fields (Ewan only)
+    # v7.2.7: NEW FAMILIES — structurally orthogonal alphas to break saturation
+    # ts_regression rettypes 0/1/3/4 (existing portfolio only uses rettype=2)
+    "regression_slope": 5.0,
+    "regression_intercept": 4.0,
+    "regression_predicted": 5.0,
+    "regression_ymean": 4.0,
+    # Vector aggregations on news/sentiment
+    "vector_news_aggregation": 5.5,
+    "vector_sentiment_aggregation": 5.0,
+    # Group-conditional regimes (sparse, selective signals)
+    "group_conditional_high_volume": 4.5,
+    "group_conditional_high_momentum": 4.5,
+    "group_conditional_low_volatility": 4.0,
+    # Multi-timeframe consensus (high-conviction sparse)
+    "multi_timeframe_consensus": 5.0,
+    # Rank stability (new consistency axis)
+    "rank_stability": 4.0,
+    # Alt operator combinations (min/max/diff selectors)
+    "alt_combo_min_max": 4.5,
+    # ts_covariance (rarely used)
+    "ts_covariance_signals": 4.0,
+    # ts_product (geometric dynamics)
+    "ts_product_signals": 3.5,
 }
 
 # v7.2: Merge research template weights dynamically

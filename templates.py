@@ -1049,6 +1049,148 @@ DELAY0_TEMPLATES = {
     ],
 }
 TEMPLATE_LIBRARY.update(DELAY0_TEMPLATES)
+
+# ══════════════════════════════════════════════════════════════
+# v7.2.7: NEW EXCELLENT TEMPLATE FAMILIES
+# Targets the saturation problem by introducing structurally orthogonal alphas.
+# The portfolio is dominated by `rank(ts_backfill(X)) * rank(-returns)` shapes.
+# These families use DIFFERENT mathematical foundations, more likely to
+# clear self-correlation against existing submissions even when fields overlap.
+#
+# Eight new family clusters covering ~70 templates:
+#   1. ts_regression rettypes 0/1/3/4 — slope/intercept/predicted/y-mean
+#      (existing portfolio only uses rettype=2). Each rettype = different signal shape.
+#   2. Vector aggregations — vec_avg/vec_sum on news/sentiment vector fields,
+#      structurally distinct from time-series operators.
+#   3. Group-conditional regimes — trade_when() on group_rank thresholds,
+#      sparse selective signals uncorrelated with always-on alphas.
+#   4. Multi-timeframe consensus — sign-agreement gating, high-conviction sparse.
+#   5. Rank stability — rewards stocks with stable ranking, new consistency axis.
+#   6. Alternative operator combinations — min/max/diff selectors instead of */+.
+#   7. ts_covariance — unnormalized co-movement (different from ts_corr).
+#   8. ts_product — geometric/multiplicative dynamics.
+# ══════════════════════════════════════════════════════════════
+V727_NEW_TEMPLATES = {
+
+    # ─── 1. REGRESSION RETTYPES 0/1/3/4 ───
+    "regression_slope": [
+        {"template_id": "rgs_01", "expression": "rank(ts_regression(close, ts_step(20), 60, lag=0, rettype=0))"},
+        {"template_id": "rgs_02", "expression": "rank(-ts_regression(returns, ts_mean(returns, 20), 60, lag=0, rettype=0))"},
+        {"template_id": "rgs_03", "expression": "rank(ts_regression(volume, ts_step(20), 60, lag=0, rettype=0)) * rank(-returns)"},
+        {"template_id": "rgs_04", "expression": "rank(ts_regression(vwap / (close + 0.001), ts_step(20), 60, lag=0, rettype=0))"},
+        {"template_id": "rgs_05", "expression": "rank(ts_regression(ts_backfill({field}, 60), ts_step(20), 60, lag=0, rettype=0))"},
+        {"template_id": "rgs_06", "expression": "rank(-ts_regression(close, ts_mean(close, 60), 120, lag=0, rettype=0))"},
+        {"template_id": "rgs_07", "expression": "group_rank(ts_regression(close, ts_step(20), 40, lag=0, rettype=0), industry)"},
+    ],
+    "regression_intercept": [
+        {"template_id": "rgi_01", "expression": "rank(-ts_regression(close, ts_step(20), 60, lag=0, rettype=1))"},
+        {"template_id": "rgi_02", "expression": "rank(ts_regression(returns, ts_mean(returns, 20), 60, lag=0, rettype=1))"},
+        {"template_id": "rgi_03", "expression": "rank(ts_regression(vwap, ts_step(20), 60, lag=0, rettype=1))"},
+        {"template_id": "rgi_04", "expression": "rank(ts_regression(close, ts_step(60), 120, lag=0, rettype=1)) * rank(-returns)"},
+        {"template_id": "rgi_05", "expression": "group_rank(-ts_regression(close, ts_step(40), 60, lag=0, rettype=1), industry)"},
+    ],
+    "regression_predicted": [
+        {"template_id": "rgp_01", "expression": "rank(close - ts_regression(close, ts_step(20), 40, lag=0, rettype=3))"},
+        {"template_id": "rgp_02", "expression": "rank(-(returns - ts_regression(returns, ts_mean(returns, 20), 60, lag=0, rettype=3)))"},
+        {"template_id": "rgp_03", "expression": "rank(vwap - ts_regression(vwap, ts_step(20), 40, lag=0, rettype=3))"},
+        {"template_id": "rgp_04", "expression": "rank(-ts_regression(close, ts_decay_linear(close, 30), 30, lag=0, rettype=3))"},
+        {"template_id": "rgp_05", "expression": "rank(ts_backfill({field}, 60) - ts_regression(ts_backfill({field}, 60), ts_step(20), 40, lag=0, rettype=3))"},
+        {"template_id": "rgp_06", "expression": "group_rank(close - ts_regression(close, ts_step(20), 40, lag=0, rettype=3), industry)"},
+    ],
+    "regression_ymean": [
+        {"template_id": "rgy_01", "expression": "rank(close - ts_regression(close, ts_step(20), 60, lag=0, rettype=4))"},
+        {"template_id": "rgy_02", "expression": "rank(returns - ts_regression(returns, ts_step(10), 30, lag=0, rettype=4))"},
+        {"template_id": "rgy_03", "expression": "rank(-ts_regression(close, ts_step(20), 120, lag=0, rettype=4)) * rank(-returns)"},
+    ],
+
+    # ─── 2. VECTOR AGGREGATION (hardcoded known-good vector fields) ───
+    "vector_news_aggregation": [
+        {"template_id": "vna_01", "expression": "rank(ts_decay_linear(vec_avg(nws18_bam), 10))"},
+        {"template_id": "vna_02", "expression": "rank(ts_zscore(vec_avg(nws18_bee), 60))"},
+        {"template_id": "vna_03", "expression": "rank(vec_sum(nws18_qep) - ts_mean(vec_sum(nws18_qep), 20))"},
+        {"template_id": "vna_04", "expression": "rank(vec_avg(nws18_ssc)) * rank(-returns)"},
+        {"template_id": "vna_05", "expression": "group_rank(ts_decay_linear(vec_avg(nws18_ber), 10), industry)"},
+        {"template_id": "vna_06", "expression": "rank(ts_delta(vec_avg(nws18_bam), 5))"},
+        {"template_id": "vna_07", "expression": "rank(-ts_corr(vec_avg(nws18_bee), returns, 20))"},
+        {"template_id": "vna_08", "expression": "rank(ts_zscore(vec_avg(nws18_qep), 60)) * rank(volume / (adv20 + 0.001))"},
+    ],
+    "vector_sentiment_aggregation": [
+        {"template_id": "vsa_01", "expression": "rank(vec_avg(scl12_sentvec) - ts_mean(vec_avg(scl12_sentvec), 20))"},
+        {"template_id": "vsa_02", "expression": "rank(ts_zscore(vec_sum(scl12_sentvec), 40))"},
+        {"template_id": "vsa_03", "expression": "rank(vec_avg(scl12_sentvec)) * rank(-returns)"},
+        {"template_id": "vsa_04", "expression": "group_zscore(ts_decay_linear(vec_avg(scl12_alltype_sentvec), 8), industry)"},
+        {"template_id": "vsa_05", "expression": "rank(ts_delta(vec_avg(scl12_alltype_sentvec), 10))"},
+        {"template_id": "vsa_06", "expression": "rank(ts_corr(vec_avg(scl12_sentvec), volume, 20))"},
+    ],
+
+    # ─── 3. GROUP-CONDITIONAL REGIMES ───
+    "group_conditional_high_volume": [
+        {"template_id": "gch_01", "expression": "trade_when(group_rank(volume, industry) > 0.7, rank(-returns), -1)"},
+        {"template_id": "gch_02", "expression": "trade_when(group_rank(volume / (adv20 + 0.001), industry) > 0.8, rank(-ts_mean(returns, 5)), -1)"},
+        {"template_id": "gch_03", "expression": "trade_when(group_rank(volume, subindustry) > 0.6, rank(ts_backfill({field}, 60)), -1)"},
+        {"template_id": "gch_04", "expression": "trade_when(group_rank(volume, industry) > 0.8, group_zscore(returns, industry), -1)"},
+    ],
+    "group_conditional_high_momentum": [
+        {"template_id": "gcm_01", "expression": "trade_when(group_rank(ts_mean(returns, 20), industry) > 0.7, rank(-ts_mean(returns, 5)), -1)"},
+        {"template_id": "gcm_02", "expression": "trade_when(group_rank(returns, sector) < 0.3, rank({field}), -1)"},
+        {"template_id": "gcm_03", "expression": "trade_when(group_rank(ts_std_dev(returns, 22), industry) > 0.7, rank(-returns), -1)"},
+        {"template_id": "gcm_04", "expression": "trade_when(group_rank(close / ts_mean(close, 60), industry) > 0.6, rank(-returns), -1)"},
+    ],
+    "group_conditional_low_volatility": [
+        {"template_id": "gcl_01", "expression": "trade_when(group_rank(ts_std_dev(returns, 22), industry) < 0.3, rank({field}), -1)"},
+        {"template_id": "gcl_02", "expression": "trade_when(group_rank(ts_std_dev(returns, 60), sector) < 0.2, rank(-returns), -1)"},
+        {"template_id": "gcl_03", "expression": "trade_when(group_rank(historical_volatility_60, industry) < 0.3, rank(ts_backfill({field}, 60)), -1)"},
+    ],
+
+    # ─── 4. MULTI-TIMEFRAME CONSENSUS ───
+    "multi_timeframe_consensus": [
+        {"template_id": "mtc_01", "expression": "trade_when(sign(ts_delta(close, 5)) == sign(ts_delta(close, 20)), rank(-returns), -1)"},
+        {"template_id": "mtc_02", "expression": "trade_when(sign(ts_mean(returns, 5)) == sign(ts_mean(returns, 60)), rank(-ts_mean(returns, 5)), -1)"},
+        {"template_id": "mtc_03", "expression": "rank(sign(ts_delta(close, 5)) + sign(ts_delta(close, 20)) + sign(ts_delta(close, 60)))"},
+        {"template_id": "mtc_04", "expression": "trade_when(sign(ts_zscore(volume, 10)) == sign(ts_zscore(volume, 60)), rank(-returns), -1)"},
+        {"template_id": "mtc_05", "expression": "rank(sign(ts_delta({field}, 20)) * sign(ts_delta({field}, 60)))"},
+        {"template_id": "mtc_06", "expression": "trade_when(ts_rank(returns, 5) > 0.7 && ts_rank(returns, 60) > 0.7, rank(-returns), -1)"},
+    ],
+
+    # ─── 5. RANK STABILITY ───
+    "rank_stability": [
+        {"template_id": "rks_01", "expression": "rank(-ts_std_dev(rank({field}), 60))"},
+        {"template_id": "rks_02", "expression": "rank(-ts_std_dev(rank(returns), 40)) * rank(-returns)"},
+        {"template_id": "rks_03", "expression": "rank(-ts_std_dev(group_rank({field}, industry), 60))"},
+        {"template_id": "rks_04", "expression": "rank(-ts_std_dev(rank(volume), 30)) * rank(-ts_mean(returns, 5))"},
+        {"template_id": "rks_05", "expression": "rank(ts_corr(rank({field}), rank(ts_delay({field}, 5)), 60))"},
+    ],
+
+    # ─── 6. ALT COMBO MIN/MAX/DIFF SELECTORS ───
+    "alt_combo_min_max": [
+        {"template_id": "acm_01", "expression": "rank(min(rank({field}), rank(-returns)))"},
+        {"template_id": "acm_02", "expression": "rank(max(rank({field}), rank(-ts_mean(returns, 5))))"},
+        {"template_id": "acm_03", "expression": "rank(rank({field}) - rank(-returns))"},
+        {"template_id": "acm_04", "expression": "rank(-min(rank(returns), rank(-ts_delta(close, 20))))"},
+        {"template_id": "acm_05", "expression": "if_else(rank({field}) > 0.5, rank(-returns), -rank(-returns))"},
+        {"template_id": "acm_06", "expression": "rank(min(group_rank({field}, industry), group_rank(-returns, industry)))"},
+    ],
+
+    # ─── 7. TS_COVARIANCE (rarely used, unnormalized co-movement) ───
+    "ts_covariance_signals": [
+        {"template_id": "tcv_01", "expression": "rank(-ts_covariance(returns, volume / (adv20 + 0.001), 60))"},
+        {"template_id": "tcv_02", "expression": "rank(ts_covariance(close, vwap, 40))"},
+        {"template_id": "tcv_03", "expression": "rank(-ts_covariance(returns, ts_backfill({field}, 60), 60))"},
+        {"template_id": "tcv_04", "expression": "group_rank(ts_covariance(returns, returns, 60), industry)"},
+        {"template_id": "tcv_05", "expression": "rank(ts_covariance(close, ts_mean(close, 20), 40))"},
+    ],
+
+    # ─── 8. TS_PRODUCT (geometric/compounding signals) ───
+    "ts_product_signals": [
+        {"template_id": "tpr_01", "expression": "rank(-(ts_product(1 + returns, 20) - 1))"},
+        {"template_id": "tpr_02", "expression": "rank(ts_product(1 + returns, 60) - ts_product(1 + returns, 20))"},
+        {"template_id": "tpr_03", "expression": "rank(-(ts_product(1 + returns, 5) - 1)) * rank({field})"},
+    ],
+}
+TEMPLATE_LIBRARY.update(V727_NEW_TEMPLATES)
+
+# Neutralization options for new families
+V727_NEUTRALIZATION = {fam: ["MARKET", "INDUSTRY", "SUBINDUSTRY", "NONE"] for fam in V727_NEW_TEMPLATES}
 DATASET_NEUTRALIZATION.update({
     "delay0_open_gap_reversal": ["MARKET", "INDUSTRY", "SUBINDUSTRY", "NONE"],
     "delay0_close_vwap_dislocation": ["MARKET", "INDUSTRY", "SUBINDUSTRY", "NONE"],
@@ -1059,6 +1201,7 @@ DATASET_NEUTRALIZATION.update({
     "delay0_news_reaction": ["MARKET", "INDUSTRY", "SUBINDUSTRY", "NONE"],
     "delay0_risk_intraday": ["MARKET", "INDUSTRY", "SUBINDUSTRY", "NONE"],
 })
+DATASET_NEUTRALIZATION.update(V727_NEUTRALIZATION)
 
 # ══════════════════════════════════════════════════════════════
 # v7.2: Merge research-backed mega template library (880 templates)
