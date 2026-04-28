@@ -1038,14 +1038,14 @@ DELAY0_TEMPLATES = {
     ],
     "delay0_news_reaction": [
         {"template_id": "d0_news_01", "expression": "rank(ts_decay_linear(ts_backfill(rp_css_mna, 20), 3)) * rank(-returns)"},
-        {"template_id": "d0_news_02", "expression": "rank(ts_decay_linear(ts_backfill(rp_css_ratings, 20), 3)) * rank(-returns)"},
+        {"template_id": "d0_news_02", "expression": "rank(ts_decay_linear(ts_backfill(rp_css_business, 20), 3)) * rank(-returns)"},
         {"template_id": "d0_news_03", "expression": "rank(ts_decay_linear(ts_backfill(news_atr_ratio, 20), 3)) * rank((vwap - close) / (close + 0.001))"},
         {"template_id": "d0_news_04", "expression": "rank(ts_backfill(snt_social_value, 20)) * rank(-returns)"},
     ],
     "delay0_risk_intraday": [
         {"template_id": "d0_risk_01", "expression": "trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.5, rank(-returns), -1)"},
         {"template_id": "d0_risk_02", "expression": "rank(-returns) * rank(beta_last_60_days_spy)"},
-        {"template_id": "d0_risk_03", "expression": "rank((vwap - close) / (close + 0.001)) * rank(-unsystematic_risk_last_60_days)"},
+        {"template_id": "d0_risk_03", "expression": "rank((vwap - close) / (close + 0.001)) * rank(-beta_last_60_days_spy)"},
     ],
 }
 TEMPLATE_LIBRARY.update(DELAY0_TEMPLATES)

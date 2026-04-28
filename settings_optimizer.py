@@ -318,6 +318,32 @@ class SettingsOptimizer:
         delay is locked at 1.
         """
         delay_choices = _delay_choices_for_expression(expression)
+
+        # v7.2.7-D0: in D0_ONLY_MODE, restrict Optuna search to the D0-recommended
+        # ranges from the research brief. Otherwise historical D=1 trials inject
+        # decay=12 / trunc=0.01 which contradict D0 best practice.
+        try:
+            import config as _cfg
+            _d0_only = getattr(_cfg, "D0_ONLY_MODE", False)
+        except Exception:
+            _d0_only = False
+
+        if _d0_only:
+            d0_universes = getattr(_cfg, "DELAY0_UNIVERSES",
+                                   ["TOP500", "TOP1000", "TOP200", "TOPSP500", "TOP3000"])
+            d0_neutralizations = getattr(_cfg, "DELAY0_NEUTRALIZATIONS",
+                                         ["SUBINDUSTRY", "INDUSTRY", "SECTOR", "MARKET", "NONE"])
+            d0_decays = getattr(_cfg, "DELAY0_DECAYS", [0, 2, 4, 6, 9])
+            d0_truncations = getattr(_cfg, "DELAY0_TRUNCATIONS",
+                                     [0.05, 0.08, 0.10, 0.03])
+            return {
+                "universe": trial.suggest_categorical("universe", d0_universes),
+                "neutralization": trial.suggest_categorical("neutralization", d0_neutralizations),
+                "decay": trial.suggest_categorical("decay", d0_decays),
+                "truncation": trial.suggest_categorical("truncation", d0_truncations),
+                "delay": trial.suggest_categorical("delay", delay_choices),
+            }
+
         return {
             "universe": trial.suggest_categorical("universe", UNIVERSES),
             "neutralization": trial.suggest_categorical("neutralization", NEUTRALIZATIONS),
@@ -420,15 +446,34 @@ class SettingsOptimizer:
                     continue
 
             # Skip if settings outside our search space
-            if universe not in UNIVERSES:
+            # v7.2.7-D0: when D0_ONLY_MODE is on, the active search space is the
+            # narrower DELAY0_* lists, so use those instead of the full UNIVERSES/etc.
+            try:
+                import config as _cfg
+                _d0_only = getattr(_cfg, "D0_ONLY_MODE", False)
+            except Exception:
+                _d0_only = False
+
+            if _d0_only:
+                _univ_space = getattr(_cfg, "DELAY0_UNIVERSES", UNIVERSES)
+                _neut_space = getattr(_cfg, "DELAY0_NEUTRALIZATIONS", NEUTRALIZATIONS)
+                _dec_space = getattr(_cfg, "DELAY0_DECAYS", DECAYS)
+                _trunc_space = getattr(_cfg, "DELAY0_TRUNCATIONS", TRUNCATIONS)
+            else:
+                _univ_space = UNIVERSES
+                _neut_space = NEUTRALIZATIONS
+                _dec_space = DECAYS
+                _trunc_space = TRUNCATIONS
+
+            if universe not in _univ_space:
                 continue
-            if neutralization not in NEUTRALIZATIONS:
+            if neutralization not in _neut_space:
                 continue
-            if decay not in DECAYS:
+            if decay not in _dec_space:
                 # Round to nearest valid decay
-                decay = min(DECAYS, key=lambda d: abs(d - decay))
-            if truncation not in TRUNCATIONS:
-                truncation = min(TRUNCATIONS, key=lambda t: abs(t - truncation))
+                decay = min(_dec_space, key=lambda d: abs(d - decay))
+            if truncation not in _trunc_space:
+                truncation = min(_trunc_space, key=lambda t: abs(t - truncation))
 
             # Get target metric value
             if target_metric == "fitness":
@@ -445,13 +490,24 @@ class SettingsOptimizer:
                 # can distinguish (settings, d=0) from (settings, d=1). When the
                 # expression supports both delays, the distribution is [0,1];
                 # when it only supports d=1, the distribution is [1].
-                dist = {
-                    "universe": optuna.distributions.CategoricalDistribution(UNIVERSES),
-                    "neutralization": optuna.distributions.CategoricalDistribution(NEUTRALIZATIONS),
-                    "decay": optuna.distributions.IntDistribution(0, 12, step=2),
-                    "truncation": optuna.distributions.CategoricalDistribution(TRUNCATIONS),
-                    "delay": optuna.distributions.CategoricalDistribution(d0_choices),
-                }
+                # v7.2.7-D0: distributions must match the narrowed D0_ONLY_MODE
+                # search space, otherwise add_trial throws ValueError.
+                if _d0_only:
+                    dist = {
+                        "universe": optuna.distributions.CategoricalDistribution(_univ_space),
+                        "neutralization": optuna.distributions.CategoricalDistribution(_neut_space),
+                        "decay": optuna.distributions.CategoricalDistribution(_dec_space),
+                        "truncation": optuna.distributions.CategoricalDistribution(_trunc_space),
+                        "delay": optuna.distributions.CategoricalDistribution(d0_choices),
+                    }
+                else:
+                    dist = {
+                        "universe": optuna.distributions.CategoricalDistribution(UNIVERSES),
+                        "neutralization": optuna.distributions.CategoricalDistribution(NEUTRALIZATIONS),
+                        "decay": optuna.distributions.IntDistribution(0, 12, step=2),
+                        "truncation": optuna.distributions.CategoricalDistribution(TRUNCATIONS),
+                        "delay": optuna.distributions.CategoricalDistribution(d0_choices),
+                    }
                 trial = optuna.trial.create_trial(
                     params={
                         "universe": universe,

@@ -71,9 +71,9 @@ DELAY0_V727_GROUP_REVERSION = [
 # Use news vector spikes / news volume as event triggers.
 # ═══════════════════════════════════════════════════════════════════════════
 DELAY0_V727_NEWS_TRIGGERS = [
-    # C1. News-Spike Reversion (vector buzz)
+    # C1. News-Spike Reversion (buzz spike — uses scalar scl12_buzz which is engine-accessible)
     {"template_id": "d0v7_news_01",
-     "expression": "trade_when(ts_arg_max(ts_backfill(vec_sum(scl12_alltype_buzzvec), 252), 5) == 0, -rank(ts_delta(close, 1)), -1)"},
+     "expression": "trade_when(ts_arg_max(ts_backfill(scl12_buzz, 252), 5) == 0, -rank(ts_delta(close, 1)), -1)"},
     # C2. After-Hours News Drift
     {"template_id": "d0v7_news_02",
      "expression": "trade_when(ts_arg_max(ts_backfill(vec_avg(nws12_afterhsz_sl), 252), 3) == 0, rank(ts_backfill(vec_avg(nws12_afterhsz_sl), 252)), -1)"},
@@ -96,12 +96,15 @@ DELAY0_V727_SENTIMENT = [
     # D1. Sentiment RSI Reversion
     {"template_id": "d0v7_snt_01",
      "expression": "-rank(ts_sum(max(ts_delta(ts_backfill(scl12_buzz, 252), 1), 0), 14) / (ts_sum(max(ts_delta(ts_backfill(scl12_buzz, 252), 1), 0), 14) + ts_sum(max(-ts_delta(ts_backfill(scl12_buzz, 252), 1), 0), 14) + 0.0001))"},
-    # D2. Buzz De-mean Long-only
+    # D2. Buzz De-mean Long-only (uses scl12_buzz, the scalar field; the vector form
+    # scl12_alltype_buzzvec is listed in dataset but rejected by engine at delay=0)
     {"template_id": "d0v7_snt_02",
-     "expression": "ts_av_diff(ts_backfill(-vec_sum(scl12_alltype_buzzvec), 20), 60)"},
+     "expression": "ts_av_diff(ts_backfill(-scl12_buzz, 20), 60)"},
     # D3. Sentiment Trend with Volume Confirmation
+    # Originally used scl12_alltype_sentimentvec which the engine rejects at d=0;
+    # snt1_cored1_score is in research_sentiment and accessible.
     {"template_id": "d0v7_snt_03",
-     "expression": "trade_when(volume > adv20, ts_zscore(ts_backfill(vec_avg(scl12_alltype_sentimentvec), 252), 20), -1)"},
+     "expression": "trade_when(volume > adv20, ts_zscore(ts_backfill(snt1_cored1_score, 252), 20), -1)"},
     # D4. Sentiment Quantile-Bucket Momentum
     {"template_id": "d0v7_snt_04",
      "expression": "group_zscore(ts_delta(ts_backfill(scl12_buzz, 252), 5), bucket(rank(ts_backfill(scl12_buzz, 252)), range=\"0,1,0.1\"))"},
@@ -148,15 +151,16 @@ DELAY0_V727_IV_RV = [
 # Family G — Analyst Sentiment Shock (3 templates)
 # ═══════════════════════════════════════════════════════════════════════════
 DELAY0_V727_ANALYST = [
-    # G1. Analyst Sentiment + Price-Drop Trigger
+    # G1. Sentiment + Price-Drop Trigger (uses snt1_cored1_score as analyst-sentiment proxy
+    # since mdl110_* fields are not in the USA standard dataset)
     {"template_id": "d0v7_anl_01",
-     "expression": "trade_when(ts_delta(close, 1) < -0.02, scale(mdl110_analyst_sentiment + mdl110_score), -1)"},
-    # G2. EPS-Estimate Revision Drift
+     "expression": "trade_when(ts_delta(close, 1) < -0.02, scale(ts_backfill(snt1_cored1_score, 252)), -1)"},
+    # G2. EPS-Estimate Revision Drift (uses actual_eps_value_quarterly which exists in USA dataset)
     {"template_id": "d0v7_anl_02",
-     "expression": "trade_when(ts_delta(ts_backfill(est_eps, 252), 5) > 0, rank(ts_delta(ts_backfill(est_eps, 252), 20)), -1)"},
-    # G3. Analyst-Sentiment Group-Adjusted Reversion
+     "expression": "trade_when(ts_delta(ts_backfill(actual_eps_value_quarterly, 252), 5) > 0, rank(ts_delta(ts_backfill(actual_eps_value_quarterly, 252), 20)), -1)"},
+    # G3. Sentiment Group-Adjusted Reversion (uses snt1_cored1_score; mdl110 not available)
     {"template_id": "d0v7_anl_03",
-     "expression": "trade_when(volume > adv20, group_zscore(mdl110_analyst_sentiment, sector) - rank(returns), -1)"},
+     "expression": "trade_when(volume > adv20, group_zscore(ts_backfill(snt1_cored1_score, 252), sector) - rank(returns), -1)"},
 ]
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -201,9 +205,11 @@ DELAY0_V727_OVERNIGHT_GAP = [
 # Verified WQ submitted alphas at Sharpe 2.0-2.58
 # ═══════════════════════════════════════════════════════════════════════════
 DELAY0_V727_FUNDAMENTAL = [
-    # J1. EPS-Yield Rank — verified WQ submitted alpha @ Sharpe 2.03
+    # J1. Earnings-Yield-style Rank — uses bookvalue_ps which exists in USA fundamental dataset
+    # Original brief used fnd6_epsfx (Sharpe 2.03 verified), but that field isn't in our dataset.
+    # bookvalue_ps / close gives a similar yield-rank signal.
     {"template_id": "d0v7_fnd_01",
-     "expression": "rank(ts_rank(fnd6_epsfx / (close + 0.001), 40))"},
+     "expression": "rank(ts_rank(bookvalue_ps / (close + 0.001), 40))"},
     # J2. EBIT/CapEx Quality — verified WQ submitted alpha @ Sharpe 2.02 / Fitness 2.30
     {"template_id": "d0v7_fnd_02",
      "expression": "-rank(ebit / (capex + 0.001))"},
