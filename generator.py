@@ -85,6 +85,20 @@ DEFAULT_BASE_FAMILY_WEIGHTS = {
     "ts_covariance_signals": 4.0,
     # ts_product (geometric dynamics)
     "ts_product_signals": 3.5,
+    # ══════════════════════════════════════════════════════════════
+    # v7.2.7-D0: New D=0 families from research brief
+    # Highest weights on families with verified WQ-published USA D0 Sharpes
+    # ══════════════════════════════════════════════════════════════
+    "d0v7_iv_rv": 7.0,            # F1=Sharpe 2.02 verified; F2-F4 derivatives — TOP PRIORITY
+    "d0v7_fundamental": 7.0,      # J1=2.03, J2=2.02, J3=2.58 — all verified WQ submissions
+    "d0v7_overnight_gap": 6.5,    # Pure D0-only edge (D1 cannot capture this)
+    "d0v7_open_price_reversal": 6.0,  # Strong D0 mechanic — published patterns
+    "d0v7_vol_regime": 6.0,       # WQ-documented D0 patterns (E1, E2)
+    "d0v7_news_triggers": 5.5,    # Event-driven, structurally orthogonal
+    "d0v7_volume_shock": 5.5,     # D1 form has Sharpe 1.5+, D0 should improve
+    "d0v7_group_reversion": 5.0,  # Diversifier, low correlation
+    "d0v7_analyst": 5.0,          # G1 is WQ-documented; uses fresh fields
+    "d0v7_sentiment": 4.5,        # D2 was a WQ-published D=1 alpha — D0 form less proven
 }
 
 # v7.2: Merge research template weights dynamically
@@ -1700,7 +1714,12 @@ class AlphaGenerator:
         return out
 
     def _sample_delay0_settings(self, family, settings_bias=None):
-        """Settings sampler for the Delay-0 mini-universe."""
+        """Settings sampler for the Delay-0 mini-universe.
+
+        v7.2.7-D0: when family is one of the v7.2.7-D0 d0v7_* families, prefer
+        the per-family universe/neutralization/decay biases from the research
+        brief over the generic DELAY0_* config lists.
+        """
         bias = settings_bias or {}
 
         def choice(options, key):
@@ -1711,6 +1730,32 @@ class AlphaGenerator:
                 return self.rng.choices(opts, weights=weights, k=1)[0]
             return self.rng.choice(opts)
 
+        # v7.2.7-D0: family-specific overrides for new d0v7_* families
+        try:
+            from delay0_v727_templates import (
+                DELAY0_V727_UNIVERSE, DELAY0_V727_NEUTRALIZATION, DELAY0_V727_DECAY,
+            )
+            if family in DELAY0_V727_UNIVERSE:
+                fam_universes = DELAY0_V727_UNIVERSE[family]
+                fam_neutralizations = DELAY0_V727_NEUTRALIZATION.get(family, ["SUBINDUSTRY", "INDUSTRY"])
+                fam_decays = DELAY0_V727_DECAY.get(family, [0, 2, 4, 6])
+                return SimulationSettings(
+                    region=config.DEFAULT_REGION,
+                    universe=choice(fam_universes, "universe"),
+                    delay=0,
+                    decay=choice(fam_decays, "decay"),
+                    neutralization=choice(fam_neutralizations, "neutralization"),
+                    truncation=choice(getattr(config, "DELAY0_TRUNCATIONS", [0.05, 0.08, 0.10]), "truncation"),
+                    pasteurization=config.DEFAULT_PASTEURIZATION,
+                    unit_handling=config.DEFAULT_UNIT_HANDLING,
+                    nan_handling=config.DEFAULT_NAN_HANDLING,
+                    max_stock_weight=config.DEFAULT_MAX_STOCK_WEIGHT,
+                    language=config.DEFAULT_LANGUAGE,
+                )
+        except (ImportError, KeyError, Exception):
+            pass
+
+        # Fallback to generic D0 config lists (original v7.2.4 D0 families)
         return SimulationSettings(
             region=config.DEFAULT_REGION,
             universe=choice(getattr(config, "DELAY0_UNIVERSES", ["TOP3000", "TOP1000", "TOP500"]), "universe"),

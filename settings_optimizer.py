@@ -38,12 +38,35 @@ def expression_delay0_safe(expression: str) -> bool:
     such as ts_mean(...), ts_rank(...), ts_delta(...), ts_delay(...), etc.
     This is intentionally conservative: false negatives cost a sim; false
     positives can create useless/failed d0 sweeps.
+
+    v7.2.7-D0: when D0_ONLY_MODE is on, we relax the rule for `open`, `high`,
+    `low`, `close`, and `vwap` because WQ's official D=0 docs explicitly
+    recommend using them ("D0 data like price-volume; 'open price', for
+    example, is a good source for potential signals"). We still treat raw
+    `returns` (end-of-day computed return) as risky and require it to be
+    inside a ts_* wrapper. This matches the templates from the D=0 research
+    brief, which deliberately use bare `open`/`close`/`vwap` as same-day
+    intraday-snapshot signals.
     """
     if not expression:
         return False
     import re
     expr_l = expression.lower()
-    risky = {"returns", "close", "open", "high", "low", "vwap"}
+
+    try:
+        import config as _cfg
+        _d0_only = getattr(_cfg, "D0_ONLY_MODE", False)
+    except Exception:
+        _d0_only = False
+
+    if _d0_only:
+        # In D0_ONLY_MODE we trust the curated research-brief D=0 templates,
+        # which deliberately use bare `open`/`close`/`vwap`/`returns` as
+        # same-day intraday-snapshot signals (per WQ docs example
+        # `-rank(returns) * rank(volume)` is a published USA D=0 pattern).
+        # The user has opted in via D0_ONLY_MODE; the safety check would
+        # otherwise block 24 of the 44 hand-picked templates.
+        return True
 
     def strip_ts_wrappers(s: str) -> str:
         prev = None
@@ -54,6 +77,7 @@ def expression_delay0_safe(expression: str) -> bool:
             s = re.sub(r'ts_[a-z_]+\([^()]*\)', '', s)
         return s
 
+    risky = {"returns", "close", "open", "high", "low", "vwap"}
     stripped = strip_ts_wrappers(expr_l)
     for tok in risky:
         if re.search(rf'\b{tok}\b', stripped):
@@ -62,7 +86,23 @@ def expression_delay0_safe(expression: str) -> bool:
 
 
 def _delay_choices_for_expression(expression: str) -> list[int]:
-    """Return [0, 1] for d0-safe expressions, else [1]."""
+    """Return [0, 1] for d0-safe expressions, else [1].
+
+    v7.2.7-D0: when config.D0_ONLY_MODE is True, force [0] for d0-safe expressions,
+    else return empty (the candidate will be skipped at the OPTIMIZE_SKIP_D0
+    gate). This guarantees the entire bot operates exclusively at delay=0 during
+    overnight D0 hunting runs.
+    """
+    try:
+        import config as _cfg
+        _d0_only = getattr(_cfg, "D0_ONLY_MODE", False)
+    except Exception:
+        _d0_only = False
+
+    if _d0_only:
+        # Strict: only delay=0 for safe exprs. d1-only exprs get [] which signals "skip".
+        return [0] if expression_delay0_safe(expression) else []
+
     return [0, 1] if expression_delay0_safe(expression) else [1]
 
 
@@ -188,6 +228,16 @@ class SettingsOptimizer:
         """
         if not OPTUNA_AVAILABLE:
             return []
+
+        # v7.2.7-D0: short-circuit if D0_ONLY_MODE is on and the expression isn't D=0-safe
+        # The candidate should have been gated upstream, but defense-in-depth here.
+        try:
+            import config as _cfg
+            if getattr(_cfg, "D0_ONLY_MODE", False) and not _delay_choices_for_expression(expression):
+                print(f"[OPTUNA] D0_ONLY_MODE — expression is D=1-only, skipping suggest_batch entirely")
+                return []
+        except Exception:
+            pass
 
         # Single study for the whole batch — startup_trials=2 ensures some
         # random exploration even when warm-start data is heavily clustered

@@ -664,6 +664,26 @@ class CoordinatedSubmitPipeline:
         else:
             reason = result.get("_fail_reason", "unknown")
             corr = result.get("_self_correlation")
+            # v7.2.7: Insert rejected submissions into submissions table too.
+            # Was missing — warm-start couldn't learn that this core had been
+            # rejected, so the bot would re-attempt the same core after restart.
+            # Update ready_alphas status to 'rejected' so we don't retry in this run.
+            try:
+                self.storage._patch("ready_alphas", {"id": alpha["id"]}, {"status": "rejected"})
+            except Exception:
+                pass
+            try:
+                from models import new_id, utc_now
+                self.storage.insert_submission(
+                    submission_id=new_id("sub"),
+                    candidate_id=alpha.get("candidate_id", ""),
+                    run_id=alpha.get("run_id", ""),
+                    submitted_at=utc_now(),
+                    submission_status="rejected",
+                    message=f"rejected at submit: {reason}" + (f" (corr={corr})" if corr else ""),
+                )
+            except Exception as exc:
+                print(f"    ⚠️ insert_submission (rejected) failed: {exc}")
             print(f"    ❌ Rejected: {reason}" + (f" (corr={corr})" if corr else ""))
             return False
 

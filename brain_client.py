@@ -293,16 +293,17 @@ class BrainClient:
                         if name == "SELF_CORRELATION" and value is not None:
                             self_corr_value = float(value)
 
-                    # Defensive guard: occasionally WQ returns PASS text with a
-                    # value just above the stated limit. Treat the numeric limit
-                    # as authoritative so we do not stage obviously correlated
-                    # variants as viable.
+                    # v7.2.7-D0 BUGFIX: previously had a "defensive guard" here that
+                    # appended SELF_CORRELATION to failed_checks whenever value > limit,
+                    # even when WQ explicitly returned PASS. This was wrong — WQ's PASS
+                    # already accounts for the Sharpe-outperformance override (an alpha
+                    # whose Sharpe is materially better than its closest correlate is
+                    # allowed to exceed the 0.7 raw limit). The guard was creating
+                    # false negatives that aborted otherwise-valid submissions.
+                    # Just record the corr value for logging without overriding WQ.
                     if name == "SELF_CORRELATION" and value is not None:
                         try:
                             self_corr_value = float(value)
-                            limit_f = float(limit) if limit is not None else 0.7
-                            if self_corr_value > limit_f:
-                                failed_checks.append(check)
                         except (TypeError, ValueError):
                             pass
 
@@ -451,16 +452,13 @@ class BrainClient:
                         if name == "SELF_CORRELATION" and value is not None:
                             self_corr_value = float(value)
 
-                    # Defensive guard: occasionally WQ returns PASS text with a
-                    # value just above the stated limit. Treat the numeric limit
-                    # as authoritative so we do not stage obviously correlated
-                    # variants as viable.
+                    # v7.2.7-D0 BUGFIX: removed the "defensive guard" that overrode
+                    # WQ's SELF_CORRELATION PASS decision. WQ's PASS already accounts
+                    # for the Sharpe-outperformance override; second-guessing it
+                    # creates false negatives that abort valid submissions.
                     if name == "SELF_CORRELATION" and value is not None:
                         try:
                             self_corr_value = float(value)
-                            limit_f = float(limit) if limit is not None else 0.7
-                            if self_corr_value > limit_f:
-                                failed_checks.append(check)
                         except (TypeError, ValueError):
                             pass
                 else:

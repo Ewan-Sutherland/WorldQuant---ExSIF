@@ -1217,3 +1217,42 @@ try:
     print(f"[TEMPLATES] Merged {len(RESEARCH_TEMPLATES)} research families ({_n_research} templates)")
 except ImportError:
     print("[TEMPLATES] research_templates.py not found — running without research library")
+
+# ══════════════════════════════════════════════════════════════
+# v7.2.7-D0: Merge D=0 v727 hand-picked templates (40 templates from research brief)
+# ══════════════════════════════════════════════════════════════
+try:
+    from delay0_v727_templates import (
+        DELAY0_V727_TEMPLATES, DELAY0_V727_NEUTRALIZATION,
+        DELAY0_V727_UNIVERSE, DELAY0_V727_DECAY,
+    )
+    TEMPLATE_LIBRARY.update(DELAY0_V727_TEMPLATES)
+    DATASET_NEUTRALIZATION.update(DELAY0_V727_NEUTRALIZATION)
+    _n_d0v7 = sum(len(v) for v in DELAY0_V727_TEMPLATES.values())
+    print(f"[TEMPLATES] Merged {len(DELAY0_V727_TEMPLATES)} v727-D0 families ({_n_d0v7} templates)")
+except ImportError:
+    print("[TEMPLATES] delay0_v727_templates.py not found")
+
+# ══════════════════════════════════════════════════════════════
+# v7.2.7-D0: D0_ONLY_MODE — strip all non-D0 templates
+# When config.D0_ONLY_MODE is True, the bot should generate ONLY d=0 alphas.
+# We accomplish that by removing every family that is NOT prefixed with
+# "delay0_" or "d0v7_". Generator/bot then picks only from the surviving families.
+# ══════════════════════════════════════════════════════════════
+def _is_d0_family(name: str) -> bool:
+    """A family is a D0 family if it's a delay0_* or d0v7_* family."""
+    return name.startswith("delay0_") or name.startswith("d0v7_")
+
+try:
+    import config as _cfg
+    _d0_only = getattr(_cfg, "D0_ONLY_MODE", False)
+except Exception:
+    _d0_only = False
+
+if _d0_only:
+    _kept = {k: v for k, v in TEMPLATE_LIBRARY.items() if _is_d0_family(k)}
+    _stripped_count = len(TEMPLATE_LIBRARY) - len(_kept)
+    _kept_template_count = sum(len(v) for v in _kept.values())
+    TEMPLATE_LIBRARY = _kept
+    print(f"[TEMPLATES] D0_ONLY_MODE — stripped {_stripped_count} non-D0 families. "
+          f"Kept {len(_kept)} D0 families ({_kept_template_count} templates)")

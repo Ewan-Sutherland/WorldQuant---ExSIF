@@ -393,6 +393,20 @@ class SubmitPipeline:
             else:
                 fail = result.get("_fail_reason", "unknown")
                 corr = result.get("_self_correlation", "")
+                # v7.2.7: Track rejected submissions in submissions table too
+                # so warm-start can learn rejected cores and skip them next run.
+                try:
+                    from models import new_id, utc_now
+                    self.storage.insert_submission(
+                        submission_id=new_id("sub"),
+                        candidate_id=alpha.get("candidate_id", ""),
+                        run_id=alpha.get("run_id", ""),
+                        submitted_at=utc_now(),
+                        submission_status="rejected",
+                        message=f"rejected at submit: {fail}" + (f" (corr={corr})" if corr else ""),
+                    )
+                except Exception:
+                    pass
                 print(f"     ❌ Rejected: {fail} (corr={corr})")
                 return False
 

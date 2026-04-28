@@ -49,8 +49,23 @@ DELAY0_REFINE_PROBABILITY = 0.05
 # mutation of the Delay 1 search. These probabilities control fresh template
 # generation only; combiner/evolver stay Delay 1 unless explicitly upgraded
 # later with their own delay-aware pools.
-DELAY0_TEMPLATE_PROBABILITY = 0.0  # v7.2.6: disabled — 170 sims, 0 eligible. Specialist d0 templates produce sub-1.25 Sharpe. d0 alphas now come ONLY from Optuna sweeps of already-eligible d1 cores.
+
+# ══════════════════════════════════════════════════════════════════════
+# v7.2.7-D0: D0-ONLY OVERNIGHT FORK
+# When True, the bot runs as a strict D=0 alpha hunter:
+#   - templates.py strips ALL non-D0 families from TEMPLATE_LIBRARY
+#   - DELAY0_TEMPLATE_PROBABILITY is forced to 1.0 (every fresh candidate is D0)
+#   - LLM/combiner/evolver stay disabled (no D1 contamination)
+#   - Optuna search space restricted to delay=[0]
+#   - Refinement Sharpe gate uses D0 thresholds (S>=1.50 entry, S>=2.0 submit)
+#   - Truncation sweep biased to 0.05-0.10 (NOT 0.01) per D0 research brief
+# Toggle this flag back to False for normal D1+D0 mixed operation.
+# ══════════════════════════════════════════════════════════════════════
+D0_ONLY_MODE = True  # v7.2.7-D0: overnight D0 hunting fork
+
+DELAY0_TEMPLATE_PROBABILITY = 1.0 if D0_ONLY_MODE else 0.0  # v7.2.7-D0: force ALL fresh candidates to D=0 in D0_ONLY_MODE
 DELAY0_TEMPLATE_FAMILIES = {
+    # Original v7.2.4 D0 families (kept available)
     "delay0_open_gap_reversal",
     "delay0_close_vwap_dislocation",
     "delay0_range_position",
@@ -59,11 +74,27 @@ DELAY0_TEMPLATE_FAMILIES = {
     "delay0_options_intraday",
     "delay0_news_reaction",
     "delay0_risk_intraday",
+    # v7.2.7-D0 NEW families (40 hand-picked templates from research brief)
+    "d0v7_open_price_reversal",
+    "d0v7_group_reversion",
+    "d0v7_news_triggers",
+    "d0v7_sentiment",
+    "d0v7_vol_regime",
+    "d0v7_iv_rv",
+    "d0v7_analyst",
+    "d0v7_volume_shock",
+    "d0v7_overnight_gap",
+    "d0v7_fundamental",
 }
-DELAY0_UNIVERSES = ["TOP3000", "TOP1000", "TOP500", "TOP200", "TOPSP500"]  # v7.2.7: added TOP200 and TOPSP500. TOPSP500 is highly liquid which suits d=0; TOP200 helps target high-volume names.
-DELAY0_NEUTRALIZATIONS = ["MARKET", "INDUSTRY", "SUBINDUSTRY", "NONE"]
-DELAY0_DECAYS = [0, 1, 2, 3, 5]
-DELAY0_TRUNCATIONS = [0.01, 0.03, 0.05, 0.08, 0.10]  # v7.2.7: added 0.10 to match d1 truncation grid
+# v7.2.7-D0: prefer liquid universes per WQ D0 docs ("D0 alphas often do well in liquid (smaller) universes")
+DELAY0_UNIVERSES = ["TOP500", "TOP1000", "TOP200", "TOPSP500", "TOP3000"]  # ordered by D0 preference
+DELAY0_NEUTRALIZATIONS = ["SUBINDUSTRY", "INDUSTRY", "SECTOR", "MARKET", "NONE"]  # research brief: subindustry/industry preferred
+# v7.2.7-D0: decay sweep — NOT zero-only. WQ USA D0 published Sharpe 2.03 at decay=9, Sharpe 2.58 at decay=0.
+DELAY0_DECAYS = [0, 2, 4, 6, 9]
+DELAY0_TRUNCATIONS = [0.05, 0.08, 0.10, 0.03] if D0_ONLY_MODE else [0.01, 0.03, 0.05, 0.08, 0.10]
+# v7.2.7-D0: research brief found published USA D0 alphas cluster at 0.08-0.10 truncation, NOT the 0.01 typical of D1 fundamentals.
+# 0.01-0.03 over-concentrates into event names and chops the very signal an event-driven D0 alpha tries to capture.
+# Order by D0 preference; fall back to 0.03 occasionally for fundamental-anchored D0 (J family).
 
 # Delay 0 alphas should not be bred with Delay 1 populations by default.
 # This avoids accidentally turning a slow Delay 1 composite into a noisy
@@ -525,7 +556,7 @@ PREFER_TS_MEAN_WINDOW = [3, 5, 10]
 
 # v5.6: LLM generation
 # v6.2.1: Bumped to 0.30 — LLM now has portfolio-additive focus prompt
-LLM_GENERATION_PROBABILITY = 0.30  # v7.2.6: boosted from 0.10 — only source of structurally orthogonal alphas. Portfolio is saturated against template-based generation, need LLM diversity to break out.
+LLM_GENERATION_PROBABILITY = 0.0 if D0_ONLY_MODE else 0.30  # v7.2.7-D0: LLM disabled in D0_ONLY_MODE — fresh templates from research brief are the proven source. v7.2.6: boosted from 0.10 — only source of structurally orthogonal alphas. Portfolio is saturated against template-based generation, need LLM diversity to break out.
 
 # v6.2.1: Signal combination — DOUBLED from 0.10 — combos with additive bias are the
 # most likely path to positive score changes
@@ -631,7 +662,7 @@ MAX_SUBMISSIONS_PER_WINDOW = 200
 # Gap mining probability: when generating fresh candidates,
 # what % should use the field-gap miner vs normal templates
 ENABLE_GAP_MINER = True  # v7.2.6: re-enabled after data showed 8% hit rate (highest of any family). The "slowdown" was the fnd2_/fnd6_ filter bug, not exhaustion.
-GAP_MINING_PROBABILITY = 0.40 if SPRINT_MODE else 0.0  # v7.2.6: 40% — keep as workhorse but leave room for templates and d0 specialists
+GAP_MINING_PROBABILITY = 0.0 if D0_ONLY_MODE else (0.40 if SPRINT_MODE else 0.0)  # v7.2.7-D0: disabled in D0_ONLY_MODE — gap miner mines D1-saturated fields which we don't need at D0. v7.2.6: 40% — keep as workhorse but leave room for templates and d0 specialists
 
 # Increased refinement depth for sprint
 if SPRINT_MODE:
